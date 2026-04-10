@@ -12,3 +12,6 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# claude
+.claude/settings.local.json

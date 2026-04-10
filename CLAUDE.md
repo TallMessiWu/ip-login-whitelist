@@ -80,4 +80,4 @@ python whitelist_manager.py settings --ssh-port 2222 --persist true/false
 `password` 字段明文存储，生产环境应优先使用 `key_file`。
 
 ## 代码提交
-代码提交时必须使用gitmoji_commit这个skill。
+代码提交时必须使用gitmoji-commit这个skill。
