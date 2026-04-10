@@ -1,0 +1,14 @@
+# 运行时生成的配置文件（含服务器列表和明文密码，禁止提交）
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
