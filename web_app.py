@@ -27,7 +27,7 @@ from whitelist_manager import (
     load_config, save_config, validate_ip_or_cidr,
     generate_apply_script, generate_status_script,
     generate_remove_script, generate_audit_log_script,
-    run_on_server,
+    run_on_server, get_merged_whitelist, _find_server, _make_ip_entry,
 )
 
 app = Flask(__name__)
@@ -35,16 +35,12 @@ app = Flask(__name__)
 
 # ─── 工具函数 ──────────────────────────────────────────────────────────────────
 
-def capture_run(server: dict, script: str, dry_run: bool = False):
+def capture_run(server: dict, script: str, dry_run: bool = False, config: dict = None):
     """执行脚本并捕获输出，返回 (success: bool, output: str)"""
-    if not dry_run and not server.get("key_file") and not server.get("password"):
-        name = server.get("name", server["host"])
-        return False, f"[ERROR] 服务器 {name} 未配置认证（需要 key_file 或 password）\n"
-
     buf = io.StringIO()
     try:
         with redirect_stdout(buf):
-            result = run_on_server(server, script, dry_run=dry_run)
+            result = run_on_server(server, script, dry_run=dry_run, config=config, interactive=False)
     except Exception as e:
         return False, f"[ERROR] 执行出错: {e}\n{buf.getvalue()}"
 
@@ -114,6 +110,111 @@ def api_whitelist_remove(ip):
     return jsonify({"success": True, "message": f"已移除 {ip}"})
 
 
+# ─── API：服务器管理 ──────────────────────────────────────────────────────────
+
+@app.route("/api/servers", methods=["POST"])
+def api_server_add():
+    data = request.json or {}
+    host = data.get("host", "").strip()
+    if not host:
+        return jsonify({"success": False, "message": "host 不能为空"}), 400
+
+    cfg = load_config()
+    if any(s["host"] == host for s in cfg["servers"]):
+        return jsonify({"success": False, "message": f"服务器 {host} 已存在"}), 409
+
+    server = {
+        "host": host,
+        "port": int(data.get("port") or 22),
+        "user": data.get("user") or "root",
+        "key_file": data.get("key_file") or "",
+        "name": data.get("name") or host,
+        "password": data.get("password") or "",
+        "proxy": data.get("proxy") or "",
+        "whitelist": [],
+    }
+    cfg["servers"].append(server)
+    save_config(cfg)
+    s2 = dict(server)
+    s2["has_password"] = bool(s2.pop("password", ""))
+    return jsonify({"success": True, "message": f"已添加服务器 {server['name']}", "server": s2})
+
+
+@app.route("/api/servers/<path:host>", methods=["DELETE"])
+def api_server_remove(host):
+    cfg = load_config()
+    before = len(cfg["servers"])
+    cfg["servers"] = [s for s in cfg["servers"] if s["host"] != host]
+    if len(cfg["servers"]) == before:
+        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+    save_config(cfg)
+    return jsonify({"success": True, "message": f"已移除服务器 {host}"})
+
+
+@app.route("/api/servers/<path:host>", methods=["PATCH"])
+def api_server_update(host):
+    """更新服务器密码或代理设置。"""
+    data = request.json or {}
+    cfg = load_config()
+    srv = _find_server(cfg, host)
+    if not srv:
+        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+
+    if "password" in data:
+        srv["password"] = data["password"]
+    if "proxy" in data:
+        srv["proxy"] = data["proxy"]
+    if "key_file" in data:
+        srv["key_file"] = data["key_file"]
+
+    save_config(cfg)
+    return jsonify({"success": True, "message": "服务器信息已更新"})
+
+
+# ─── API：服务器专属白名单 ─────────────────────────────────────────────────────
+
+@app.route("/api/servers/<path:host>/whitelist", methods=["POST"])
+def api_server_whitelist_add(host):
+    data = request.json or {}
+    ip = data.get("ip", "").strip()
+    description = data.get("description", "").strip()
+
+    if not ip:
+        return jsonify({"success": False, "message": "IP 不能为空"}), 400
+    if not validate_ip_or_cidr(ip):
+        return jsonify({"success": False, "message": f"无效的 IP 或 CIDR: {ip}"}), 400
+
+    cfg = load_config()
+    srv = _find_server(cfg, host)
+    if not srv:
+        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+
+    wl = srv.setdefault("whitelist", [])
+    if any(e["ip"] == ip for e in wl):
+        return jsonify({"success": False, "message": f"{ip} 已在该服务器白名单中"}), 409
+
+    entry = _make_ip_entry(ip, description)
+    wl.append(entry)
+    save_config(cfg)
+    return jsonify({"success": True, "message": f"已添加 {ip}", "entry": entry})
+
+
+@app.route("/api/servers/<path:host>/whitelist/<path:ip>", methods=["DELETE"])
+def api_server_whitelist_remove(host, ip):
+    cfg = load_config()
+    srv = _find_server(cfg, host)
+    if not srv:
+        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+
+    before = len(srv.get("whitelist", []))
+    srv["whitelist"] = [e for e in srv.get("whitelist", []) if e["ip"] != ip]
+    if len(srv["whitelist"]) == before:
+        return jsonify({"success": False, "message": f"{ip} 不在该服务器白名单中"}), 404
+
+    save_config(cfg)
+    return jsonify({"success": True, "message": f"已移除 {ip}"})
+
+
 # ─── API：设置 ────────────────────────────────────────────────────────────────
 
 @app.route("/api/settings", methods=["PATCH"])
@@ -166,7 +267,7 @@ def api_deploy():
     results = []
     success_count = 0
     for server in servers:
-        ok, output = capture_run(server, script, dry_run=dry_run)
+        ok, output = capture_run(server, script, dry_run=dry_run, config=cfg)
         if ok:
             success_count += 1
         results.append({
@@ -202,7 +303,7 @@ def api_status():
 
     results = []
     for server in servers:
-        ok, output = capture_run(server, script)
+        ok, output = capture_run(server, script, config=cfg)
         results.append({
             "server": server.get("name", server["host"]),
             "host": server["host"],
@@ -232,7 +333,7 @@ def api_audit_log():
 
     results = []
     for server in servers:
-        ok, output = capture_run(server, script)
+        ok, output = capture_run(server, script, config=cfg)
         results.append({
             "server": server.get("name", server["host"]),
             "host": server["host"],

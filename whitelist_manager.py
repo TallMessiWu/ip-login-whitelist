@@ -68,6 +68,34 @@ def validate_ip_or_cidr(ip_str: str) -> bool:
 
 # ─── IP 白名单管理 ────────────────────────────────────────────────────────────
 
+def _find_server(config: dict, host_or_name: str) -> dict | None:
+    """按 host 或 name 查找服务器，找不到返回 None。"""
+    for s in config["servers"]:
+        if s["host"] == host_or_name or s.get("name") == host_or_name:
+            return s
+    return None
+
+
+def _make_ip_entry(ip: str, desc: str) -> dict:
+    return {
+        "ip": ip,
+        "description": desc or "",
+        "added_by": getpass.getuser(),
+        "added_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def get_merged_whitelist(server: dict, global_whitelist: list) -> list:
+    """合并全局白名单与服务器专属白名单（去重）。"""
+    seen = set()
+    merged = []
+    for entry in global_whitelist + server.get("whitelist", []):
+        if entry["ip"] not in seen:
+            seen.add(entry["ip"])
+            merged.append(entry)
+    return merged
+
+
 def cmd_ip_add(args):
     config = load_config()
     ip = args.ip.strip()
@@ -76,43 +104,74 @@ def cmd_ip_add(args):
         print(f"[ERROR] 无效的 IP 或 CIDR 格式: {ip}")
         sys.exit(1)
 
-    existing = [e["ip"] for e in config["whitelist"]]
-    if ip in existing:
-        print(f"[WARN] {ip} 已在白名单中，跳过")
-        return
-
-    entry = {
-        "ip": ip,
-        "description": args.desc or "",
-        "added_by": getpass.getuser(),
-        "added_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    config["whitelist"].append(entry)
-    save_config(config)
-    print(f"[OK] 已添加 {ip} 到白名单 (备注: {entry['description'] or '无'})")
+    if args.server:
+        # 添加到指定服务器的专属白名单
+        srv = _find_server(config, args.server)
+        if not srv:
+            print(f"[ERROR] 未找到服务器: {args.server}")
+            sys.exit(1)
+        wl = srv.setdefault("whitelist", [])
+        if any(e["ip"] == ip for e in wl):
+            print(f"[WARN] {ip} 已在 {srv['name']} 的专属白名单中，跳过")
+            return
+        wl.append(_make_ip_entry(ip, args.desc))
+        save_config(config)
+        print(f"[OK] 已添加 {ip} 到 {srv['name']} 的专属白名单")
+    else:
+        # 添加到全局白名单
+        if any(e["ip"] == ip for e in config["whitelist"]):
+            print(f"[WARN] {ip} 已在全局白名单中，跳过")
+            return
+        config["whitelist"].append(_make_ip_entry(ip, args.desc))
+        save_config(config)
+        print(f"[OK] 已添加 {ip} 到全局白名单")
 
 
 def cmd_ip_remove(args):
     config = load_config()
     ip = args.ip.strip()
-    before = len(config["whitelist"])
-    config["whitelist"] = [e for e in config["whitelist"] if e["ip"] != ip]
 
-    if len(config["whitelist"]) == before:
-        print(f"[WARN] {ip} 不在白名单中")
-        return
-
-    save_config(config)
-    print(f"[OK] 已从白名单移除 {ip}")
+    if args.server:
+        srv = _find_server(config, args.server)
+        if not srv:
+            print(f"[ERROR] 未找到服务器: {args.server}")
+            sys.exit(1)
+        before = len(srv.get("whitelist", []))
+        srv["whitelist"] = [e for e in srv.get("whitelist", []) if e["ip"] != ip]
+        if len(srv["whitelist"]) == before:
+            print(f"[WARN] {ip} 不在 {srv['name']} 的专属白名单中")
+            return
+        save_config(config)
+        print(f"[OK] 已从 {srv['name']} 的专属白名单移除 {ip}")
+    else:
+        before = len(config["whitelist"])
+        config["whitelist"] = [e for e in config["whitelist"] if e["ip"] != ip]
+        if len(config["whitelist"]) == before:
+            print(f"[WARN] {ip} 不在全局白名单中")
+            return
+        save_config(config)
+        print(f"[OK] 已从全局白名单移除 {ip}")
 
 
 def cmd_ip_list(args):
     config = load_config()
-    wl = config["whitelist"]
+
+    if args.server:
+        srv = _find_server(config, args.server)
+        if not srv:
+            print(f"[ERROR] 未找到服务器: {args.server}")
+            sys.exit(1)
+        wl = srv.get("whitelist", [])
+        label = f"{srv['name']} 的专属白名单"
+    else:
+        wl = config["whitelist"]
+        label = "全局白名单"
+
     if not wl:
-        print("白名单为空")
+        print(f"{label} 为空")
         return
 
+    print(f"\n── {label} ──")
     print(f"\n{'IP/CIDR':<20} {'备注':<20} {'添加人':<15} {'添加时间'}")
     print("-" * 75)
     for e in wl:
@@ -138,7 +197,8 @@ def cmd_server_add(args):
         "key_file": args.key or "",
         "name": args.name or host,
         "password": args.password or "",
-        "proxy": args.proxy or ""
+        "proxy": args.proxy or "",
+        "whitelist": []
     }
     config["servers"].append(server)
     save_config(config)
@@ -435,7 +495,7 @@ echo "=== 白名单已移除 ==="
 
 # ─── SSH 远程执行 ─────────────────────────────────────────────────────────────
 
-def run_on_server(server: dict, script: str, dry_run: bool = False, config: dict = None) -> bool:
+def run_on_server(server: dict, script: str, dry_run: bool = False, config: dict = None, interactive: bool = True) -> bool:
     host = server["host"]
     port = server.get("port", 22)
     user = server.get("user", "root")
@@ -458,7 +518,7 @@ def run_on_server(server: dict, script: str, dry_run: bool = False, config: dict
 
     try:
         import paramiko
-        return _run_via_paramiko(host, port, user, key_file, password, script, proxy)
+        return _run_via_paramiko(host, port, user, key_file, password, script, proxy, interactive=interactive)
     except ImportError:
         return _run_via_subprocess(host, port, user, key_file, script, proxy)
 
@@ -523,7 +583,7 @@ def _proxy_to_nc_command(proxy: str) -> str:
     return ""
 
 
-def _run_via_paramiko(host, port, user, key_file, password, script, proxy="") -> bool:
+def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", interactive=True) -> bool:
     import paramiko
 
     client = paramiko.SSHClient()
@@ -546,10 +606,13 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="") ->
     cache_key = f"{user}@{host}"
     needs_password = not key_file
 
-    # 密码优先级：config 存储 > 内存缓存 > 交互输入
+    # 密码优先级：config 存储 > 内存缓存 > 交互输入（非交互模式下直接报错）
     if password:
         _password_cache[cache_key] = password  # 存入缓存，认证失败时可清除重问
     elif needs_password and cache_key not in _password_cache:
+        if not interactive:
+            print(f"[ERROR] {host} 未配置密码或密钥，Web 模式下无法交互输入，请通过 CLI `server add --password` 配置")
+            return False
         _password_cache[cache_key] = getpass.getpass(f"  请输入 {user}@{host} 的密码: ")
 
     if needs_password:
@@ -566,7 +629,7 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="") ->
             if not needs_password:
                 return False
             _password_cache.pop(cache_key, None)
-            if attempt == 1:
+            if attempt == 1 or not interactive:
                 print(f"[ERROR] {host} 认证仍然失败，放弃连接")
                 return False
             new_pwd = getpass.getpass(f"  请重新输入 {user}@{host} 的密码: ")
@@ -697,10 +760,10 @@ def cmd_deploy(args):
         print("\n[审计模式] 所有 SSH 连接仍可正常登录，非白名单 IP 将被记录到系统日志")
         print("  验证完成后，用 deploy（不加 --audit）切换为真实拦截\n")
 
-    script = generate_apply_script(whitelist, ssh_port, persist, audit=audit)
-
     success_count = 0
     for server in servers:
+        merged = get_merged_whitelist(server, whitelist)
+        script = generate_apply_script(merged, ssh_port, persist, audit=audit)
         if run_on_server(server, script, dry_run=args.dry_run, config=config):
             success_count += 1
 
@@ -809,13 +872,16 @@ def build_parser() -> argparse.ArgumentParser:
     ip_add = ip_sub.add_parser("add", help="添加 IP 到白名单")
     ip_add.add_argument("ip", help="IP 地址或 CIDR（如 192.168.1.1 或 10.0.0.0/24）")
     ip_add.add_argument("--desc", "-d", help="备注说明")
+    ip_add.add_argument("--server", "-s", help="添加到指定服务器的专属白名单（不指定则为全局）")
     ip_add.set_defaults(func=cmd_ip_add)
 
     ip_rm = ip_sub.add_parser("remove", help="从白名单移除 IP")
     ip_rm.add_argument("ip", help="要移除的 IP 或 CIDR")
+    ip_rm.add_argument("--server", "-s", help="从指定服务器的专属白名单移除（不指定则为全局）")
     ip_rm.set_defaults(func=cmd_ip_remove)
 
     ip_ls = ip_sub.add_parser("list", help="查看白名单")
+    ip_ls.add_argument("--server", "-s", help="查看指定服务器的专属白名单（不指定则为全局）")
     ip_ls.set_defaults(func=cmd_ip_list)
 
     # server 子命令
