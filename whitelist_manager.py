@@ -17,6 +17,9 @@ from urllib.parse import urlparse
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
+# 进程内密码缓存，key = "user@host"，避免同一次运行反复提示
+_password_cache: dict = {}
+
 DEFAULT_CONFIG = {
     "whitelist": [],
     "servers": [],
@@ -540,13 +543,56 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="") ->
         else:
             print(f"[WARN] 密钥文件不存在: {key_path}")
 
+    cache_key = f"{user}@{host}"
+    needs_password = not key_file
+
+    # 密码优先级：config 存储 > 内存缓存 > 交互输入
     if password:
-        connect_kwargs["password"] = password
-    elif not key_file:
-        connect_kwargs["password"] = getpass.getpass(f"  请输入 {user}@{host} 的密码: ")
+        _password_cache[cache_key] = password  # 存入缓存，认证失败时可清除重问
+    elif needs_password and cache_key not in _password_cache:
+        _password_cache[cache_key] = getpass.getpass(f"  请输入 {user}@{host} 的密码: ")
+
+    if needs_password:
+        connect_kwargs["password"] = _password_cache[cache_key]
+
+    password_updated = False  # 标记是否在认证失败后重新输入了新密码
+
+    for attempt in range(2):  # 最多重试一次（认证失败时重新输入）
+        try:
+            client.connect(**connect_kwargs)
+            break
+        except paramiko.AuthenticationException:
+            print(f"[ERROR] {host} 认证失败，密码错误")
+            if not needs_password:
+                return False
+            _password_cache.pop(cache_key, None)
+            if attempt == 1:
+                print(f"[ERROR] {host} 认证仍然失败，放弃连接")
+                return False
+            new_pwd = getpass.getpass(f"  请重新输入 {user}@{host} 的密码: ")
+            _password_cache[cache_key] = new_pwd
+            connect_kwargs["password"] = new_pwd
+            password_updated = True
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        except Exception as e:
+            print(f"[ERROR] 连接 {host} 失败: {e}")
+            return False
+
+    # 认证成功且密码是重新输入的，回写到 config.json
+    if password_updated:
+        try:
+            cfg = load_config()
+            for s in cfg["servers"]:
+                if s["host"] == host and s.get("user", "root") == user:
+                    s["password"] = _password_cache[cache_key]
+                    break
+            save_config(cfg)
+            print(f"[OK] 新密码已保存到 config.json")
+        except Exception as e:
+            print(f"[WARN] 密码保存失败: {e}")
 
     try:
-        client.connect(**connect_kwargs)
         stdin, stdout, stderr = client.exec_command("bash -s", get_pty=True)
         stdin.write(script)
         stdin.channel.shutdown_write()
@@ -565,7 +611,7 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="") ->
             print(f"[ERROR] {host} 执行失败，退出码: {exit_code}")
             return False
     except Exception as e:
-        print(f"[ERROR] 连接 {host} 失败: {e}")
+        print(f"[ERROR] {host} 执行脚本失败: {e}")
         return False
     finally:
         client.close()
