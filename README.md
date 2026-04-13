@@ -146,6 +146,7 @@ python whitelist_manager.py deploy --server 10.0.1.1
 --user, -u     SSH 用户名，默认 root
 --key,  -k     SSH 私钥文件路径（优先使用）
 --password     SSH 密码（明文存储，不推荐）
+--proxy        该服务器专用代理，如 socks5://127.0.0.1:1080
 ```
 
 ### 下发与运维
@@ -175,6 +176,27 @@ python whitelist_manager.py settings --ssh-port 2222
 
 # 关闭重启后自动恢复规则
 python whitelist_manager.py settings --persist false
+
+# 设置全局代理（对所有服务器生效，单台服务器的 --proxy 优先级更高）
+python whitelist_manager.py settings --proxy socks5://127.0.0.1:1080
+
+# 清除全局代理
+python whitelist_manager.py settings --proxy ""
+```
+
+也可通过环境变量设置兜底代理（优先级低于配置文件）：
+
+```bash
+export ALL_PROXY=socks5://127.0.0.1:1080
+python whitelist_manager.py deploy
+```
+
+**代理优先级**：单台服务器 `--proxy` > 全局 `settings --proxy` > 环境变量 `ALL_PROXY` / `SOCKS_PROXY`
+
+支持协议：`socks5://`、`socks4://`、`http://`。使用 SOCKS 代理需安装 PySocks：
+
+```bash
+pip install PySocks
 ```
 
 ---

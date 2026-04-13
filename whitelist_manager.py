@@ -13,6 +13,7 @@ import subprocess
 import ipaddress
 import getpass
 from pathlib import Path
+from urllib.parse import urlparse
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
@@ -21,9 +22,22 @@ DEFAULT_CONFIG = {
     "servers": [],
     "settings": {
         "ssh_port": 22,
-        "persist_rules": True
+        "persist_rules": True,
+        "proxy": ""
     }
 }
+
+def _resolve_proxy(server: dict, config: dict) -> str:
+    """按优先级解析代理：per-server > 全局 settings > 环境变量"""
+    if server.get("proxy"):
+        return server["proxy"]
+    if config.get("settings", {}).get("proxy"):
+        return config["settings"]["proxy"]
+    for env in ("ALL_PROXY", "all_proxy", "SOCKS_PROXY", "socks_proxy"):
+        v = os.environ.get(env, "")
+        if v:
+            return v
+    return ""
 
 
 # ─── 配置管理 ────────────────────────────────────────────────────────────────
@@ -120,7 +134,8 @@ def cmd_server_add(args):
         "user": args.user or "root",
         "key_file": args.key or "",
         "name": args.name or host,
-        "password": args.password or ""
+        "password": args.password or "",
+        "proxy": args.proxy or ""
     }
     config["servers"].append(server)
     save_config(config)
@@ -148,11 +163,12 @@ def cmd_server_list(args):
         print("服务器列表为空")
         return
 
-    print(f"\n{'名称':<20} {'地址':<20} {'端口':<8} {'用户':<15} {'密钥文件'}")
-    print("-" * 80)
+    print(f"\n{'名称':<20} {'地址':<20} {'端口':<8} {'用户':<15} {'密钥文件':<20} {'代理'}")
+    print("-" * 100)
     for s in servers:
         key_info = s.get('key_file') or ('(密码)' if s.get('password') else '(交互)')
-        print(f"{s.get('name',''):<20} {s['host']:<20} {s.get('port',22):<8} {s.get('user','root'):<15} {key_info}")
+        proxy_info = s.get('proxy') or '-'
+        print(f"{s.get('name',''):<20} {s['host']:<20} {s.get('port',22):<8} {s.get('user','root'):<15} {key_info:<20} {proxy_info}")
     print(f"\n共 {len(servers)} 台服务器")
 
 
@@ -416,16 +432,19 @@ echo "=== 白名单已移除 ==="
 
 # ─── SSH 远程执行 ─────────────────────────────────────────────────────────────
 
-def run_on_server(server: dict, script: str, dry_run: bool = False) -> bool:
+def run_on_server(server: dict, script: str, dry_run: bool = False, config: dict = None) -> bool:
     host = server["host"]
     port = server.get("port", 22)
     user = server.get("user", "root")
     key_file = server.get("key_file", "")
     password = server.get("password", "")
     name = server.get("name", host)
+    proxy = _resolve_proxy(server, config or {})
 
     print(f"\n{'='*60}")
     print(f"目标服务器: {name} ({user}@{host}:{port})")
+    if proxy:
+        print(f"使用代理:   {proxy}")
 
     if dry_run:
         print("[DRY-RUN] 将执行以下脚本:")
@@ -436,18 +455,83 @@ def run_on_server(server: dict, script: str, dry_run: bool = False) -> bool:
 
     try:
         import paramiko
-        return _run_via_paramiko(host, port, user, key_file, password, script)
+        return _run_via_paramiko(host, port, user, key_file, password, script, proxy)
     except ImportError:
-        return _run_via_subprocess(host, port, user, key_file, script)
+        return _run_via_subprocess(host, port, user, key_file, script, proxy)
 
 
-def _run_via_paramiko(host, port, user, key_file, password, script) -> bool:
+def _make_proxy_sock(proxy: str, host: str, port: int):
+    """根据代理 URL 创建 socket，供 paramiko 使用。失败时返回 None。"""
+    if not proxy:
+        return None
+    parsed = urlparse(proxy)
+    scheme = parsed.scheme.lower()
+    proxy_host = parsed.hostname
+    proxy_port = parsed.port
+
+    if scheme in ("socks5", "socks5h", "socks4", "socks4a"):
+        try:
+            import socks  # PySocks
+            socks_type = socks.SOCKS5 if scheme.startswith("socks5") else socks.SOCKS4
+            sock = socks.create_connection(
+                (host, port),
+                proxy_type=socks_type,
+                proxy_addr=proxy_host,
+                proxy_port=proxy_port,
+                proxy_username=parsed.username or None,
+                proxy_password=parsed.password or None,
+            )
+            return sock
+        except ImportError:
+            print("[WARN] 检测到 SOCKS 代理但未安装 PySocks，请运行: pip install PySocks")
+            print("[WARN] 将尝试直连（可能超时）")
+            return None
+    elif scheme in ("http", "https"):
+        # HTTP CONNECT 代理
+        import socket
+        s = socket.create_connection((proxy_host, proxy_port), timeout=30)
+        connect_str = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
+        s.sendall(connect_str.encode())
+        resp = s.recv(4096).decode("utf-8", errors="replace")
+        if "200" not in resp.split("\n")[0]:
+            print(f"[ERROR] HTTP 代理 CONNECT 失败: {resp.splitlines()[0]}")
+            s.close()
+            return None
+        return s
+    else:
+        print(f"[WARN] 不支持的代理协议: {scheme}，将直连")
+        return None
+
+
+def _proxy_to_nc_command(proxy: str) -> str:
+    """将代理 URL 转为 nc ProxyCommand 字符串（%h %p 占位符）。"""
+    if not proxy:
+        return ""
+    parsed = urlparse(proxy)
+    scheme = parsed.scheme.lower()
+    proxy_host = parsed.hostname
+    proxy_port = parsed.port or 1080
+    if scheme in ("socks5", "socks5h"):
+        return f"nc -X 5 -x {proxy_host}:{proxy_port} %h %p"
+    elif scheme in ("socks4", "socks4a"):
+        return f"nc -X 4 -x {proxy_host}:{proxy_port} %h %p"
+    elif scheme in ("http", "https"):
+        return f"nc -X connect -x {proxy_host}:{proxy_port} %h %p"
+    return ""
+
+
+def _run_via_paramiko(host, port, user, key_file, password, script, proxy="") -> bool:
     import paramiko
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     connect_kwargs = {"hostname": host, "port": port, "username": user, "timeout": 30}
+
+    if proxy:
+        sock = _make_proxy_sock(proxy, host, port)
+        if sock is not None:
+            connect_kwargs["sock"] = sock
 
     if key_file:
         key_path = os.path.expanduser(key_file)
@@ -487,10 +571,16 @@ def _run_via_paramiko(host, port, user, key_file, password, script) -> bool:
         client.close()
 
 
-def _run_via_subprocess(host, port, user, key_file, script) -> bool:
+def _run_via_subprocess(host, port, user, key_file, script, proxy="") -> bool:
     cmd = ["ssh", "-p", str(port),
            "-o", "StrictHostKeyChecking=accept-new",
            "-o", "ConnectTimeout=30"]
+    if proxy:
+        nc_cmd = _proxy_to_nc_command(proxy)
+        if nc_cmd:
+            cmd += ["-o", f"ProxyCommand={nc_cmd}"]
+        else:
+            print(f"[WARN] 无法将代理 {proxy} 转为 ProxyCommand，将直连")
     if key_file:
         cmd += ["-i", os.path.expanduser(key_file)]
     cmd += [f"{user}@{host}", "bash -s"]
@@ -565,7 +655,7 @@ def cmd_deploy(args):
 
     success_count = 0
     for server in servers:
-        if run_on_server(server, script, dry_run=args.dry_run):
+        if run_on_server(server, script, dry_run=args.dry_run, config=config):
             success_count += 1
 
     if not args.dry_run:
@@ -581,7 +671,7 @@ def cmd_status(args):
     ssh_port = config["settings"].get("ssh_port", 22)
     script = generate_status_script(ssh_port)
     for server in servers:
-        run_on_server(server, script)
+        run_on_server(server, script, config=config)
 
 
 def cmd_remove(args):
@@ -601,7 +691,7 @@ def cmd_remove(args):
 
     script = generate_remove_script(ssh_port)
     for server in servers:
-        run_on_server(server, script)
+        run_on_server(server, script, config=config)
 
 
 def cmd_audit_log(args):
@@ -610,7 +700,7 @@ def cmd_audit_log(args):
     ssh_port = config["settings"].get("ssh_port", 22)
     script = generate_audit_log_script(ssh_port, args.lines)
     for server in servers:
-        run_on_server(server, script)
+        run_on_server(server, script, config=config)
 
 
 def cmd_settings(args):
@@ -621,6 +711,12 @@ def cmd_settings(args):
     if args.persist is not None:
         config["settings"]["persist_rules"] = args.persist
         print(f"[OK] 规则持久化: {'开启' if args.persist else '关闭'}")
+    if args.proxy is not None:
+        config["settings"]["proxy"] = args.proxy
+        if args.proxy:
+            print(f"[OK] 全局代理已设为 {args.proxy}")
+        else:
+            print("[OK] 全局代理已清除")
     save_config(config)
     print(f"\n当前设置:\n{json.dumps(config['settings'], indent=2, ensure_ascii=False)}")
 
@@ -687,6 +783,7 @@ def build_parser() -> argparse.ArgumentParser:
     srv_add.add_argument("--key", "-k", help="SSH 私钥文件路径")
     srv_add.add_argument("--password", help="SSH 密码（建议改用密钥）")
     srv_add.add_argument("--name", "-n", help="服务器别名")
+    srv_add.add_argument("--proxy", help="代理地址，如 socks5://127.0.0.1:1080 或 http://host:port")
     srv_add.set_defaults(func=cmd_server_add)
 
     srv_rm = srv_sub.add_parser("remove", help="移除服务器")
@@ -728,6 +825,8 @@ def build_parser() -> argparse.ArgumentParser:
     settings.add_argument("--ssh-port", type=int, help="设置全局 SSH 端口")
     settings.add_argument("--persist", type=lambda x: x.lower() == "true",
                           metavar="true/false", help="是否持久化规则（重启后生效）")
+    settings.add_argument("--proxy", metavar="URL",
+                          help="全局代理，如 socks5://127.0.0.1:1080（留空字符串可清除）")
     settings.set_defaults(func=cmd_settings)
 
     return parser
