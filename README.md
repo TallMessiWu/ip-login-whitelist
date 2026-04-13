@@ -11,10 +11,32 @@
 ```bash
 git clone https://github.com/TallMessiWu/ip-login-whitelist.git
 cd ip-login-whitelist
-pip install paramiko      # 可选，无此包时自动降级为系统 ssh 命令
+pip install -r requirements.txt   # flask + paramiko
 ```
 
+`paramiko` 可选，无此包时自动降级为系统 `ssh` 命令；`flask` 仅 Web 界面需要。
+
 **系统要求**：Python 3.7+，远端服务器需有 `iptables` 或 `firewalld`（需 root 权限执行）。
+
+---
+
+## Web 界面
+
+除 CLI 外，还提供浏览器管理界面：
+
+```bash
+python web_app.py              # 默认 http://127.0.0.1:8080
+python web_app.py --port 9090  # 自定义端口
+```
+
+打开浏览器访问即可：
+
+- **IP 白名单**：在线添加 / 删除白名单 IP，实时生效到 `config.json`
+- **服务器列表**：查看所有托管服务器及认证方式，一键检查各服务器白名单状态
+- **下发白名单**：支持选择目标服务器、切换审计模式、Dry Run 预览，执行输出实时展示
+- **设置**：在线修改全局 SSH 端口和规则持久化开关
+
+> 服务器认证（密钥/密码）仍通过 CLI `server add` 配置，Web 界面不暴露明文密码。
 
 ---
 
@@ -182,7 +204,9 @@ python whitelist_manager.py settings --persist false
 ## 文件说明
 
 ```
-whitelist_manager.py   # 全部功能，单文件，无需安装
-requirements.txt       # 依赖（仅 paramiko，可选）
+whitelist_manager.py   # CLI 全部功能，单文件
+web_app.py             # Web 管理界面后端（Flask）
+templates/index.html   # Web 管理界面前端
+requirements.txt       # 依赖：paramiko（可选）+ flask（Web 界面需要）
 config.json            # 运行时自动生成，存储白名单和服务器列表（不提交）
 ```

@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SSH IP 白名单管理</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    .log-output { font-family: 'Courier New', 'Consolas', monospace; }
+    .fade-in { animation: fadeIn .2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="bg-slate-50 min-h-screen text-sm">
+
+  <!-- Header -->
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-2.5">
+        <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+          <i class="fas fa-shield-halved text-white text-sm"></i>
+        </div>
+        <div>
+          <div class="font-semibold text-slate-800 leading-tight">SSH IP 白名单</div>
+          <div class="text-xs text-slate-400 leading-tight" id="header-summary">加载中...</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="refreshAll()" title="刷新"
+          class="w-8 h-8 flex items-center justify-center rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors">
+          <i class="fas fa-rotate-right text-sm" id="refresh-icon"></i>
+        </button>
+        <button onclick="openSettings()"
+          class="flex items-center gap-1.5 text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors text-sm">
+          <i class="fas fa-sliders"></i>
+          <span>设置</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Toast 容器 -->
+  <div id="toasts" class="fixed top-4 right-4 z-50 flex flex-col gap-2 w-72"></div>
+
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+
+    <!-- 上方两栏 -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+      <!-- ── IP 白名单 ─────────────────────────────────────────── -->
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col">
+        <div class="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <i class="fas fa-shield-check text-green-500"></i>
+            <span class="font-semibold text-slate-800">IP 白名单</span>
+            <span id="wl-badge"
+              class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 text-xs font-medium">0</span>
+          </div>
+          <button onclick="toggleAddForm()"
+            class="flex items-center gap-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
+            <i class="fas fa-plus text-xs"></i> 添加 IP
+          </button>
+        </div>
+
+        <!-- 添加表单 -->
+        <div id="add-form" class="hidden px-5 py-3 bg-blue-50 border-b border-blue-100">
+          <div class="flex gap-2">
+            <input id="new-ip" type="text" placeholder="IP 或 CIDR，如 192.168.1.1 / 10.0.0.0/24"
+              class="flex-1 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              onkeydown="if(event.key==='Enter')addIP()">
+            <input id="new-desc" type="text" placeholder="备注"
+              class="w-28 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              onkeydown="if(event.key==='Enter')addIP()">
+            <button onclick="addIP()"
+              class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-sm transition-colors">添加</button>
+            <button onclick="toggleAddForm()"
+              class="text-slate-400 hover:text-slate-600 px-2 py-1.5 rounded-md">
+              <i class="fas fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- 列表 -->
+        <div id="wl-list" class="flex-1 divide-y divide-slate-50 overflow-auto max-h-80">
+          <div class="px-5 py-10 text-center text-slate-400">
+            <i class="fas fa-circle-notch spin mr-1"></i> 加载中...
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 服务器列表 ──────────────────────────────────────────── -->
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col">
+        <div class="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <i class="fas fa-server text-violet-500"></i>
+            <span class="font-semibold text-slate-800">服务器</span>
+            <span id="srv-badge"
+              class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 text-xs font-medium">0</span>
+          </div>
+          <button onclick="checkAllStatus()"
+            class="flex items-center gap-1 text-slate-500 hover:text-slate-700 border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
+            <i class="fas fa-heartbeat"></i> 检查状态
+          </button>
+        </div>
+
+        <div id="srv-list" class="flex-1 divide-y divide-slate-50 overflow-auto max-h-80">
+          <div class="px-5 py-10 text-center text-slate-400">
+            <i class="fas fa-circle-notch spin mr-1"></i> 加载中...
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 部署区域 ───────────────────────────────────────────────── -->
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm">
+      <div class="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <i class="fas fa-paper-plane text-orange-500"></i>
+        <span class="font-semibold text-slate-800">下发白名单</span>
+      </div>
+
+      <div class="px-5 py-4">
+        <!-- 控制行 -->
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-3 mb-4">
+
+          <!-- 目标服务器 -->
+          <div class="flex items-center gap-2">
+            <label class="text-slate-600 font-medium whitespace-nowrap">目标服务器</label>
+            <select id="deploy-server"
+              class="border border-slate-300 rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+              <option value="">全部</option>
+            </select>
+          </div>
+
+          <!-- 审计模式 toggle -->
+          <label class="flex items-center gap-2 cursor-pointer select-none">
+            <div class="relative">
+              <input type="checkbox" id="audit-mode" class="sr-only peer">
+              <div class="w-9 h-5 bg-slate-200 peer-checked:bg-amber-400 rounded-full transition-colors duration-200"></div>
+              <div class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 peer-checked:translate-x-4"></div>
+            </div>
+            <span class="text-slate-700 font-medium">审计模式</span>
+            <span class="text-xs text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full">只记录不拦截</span>
+          </label>
+
+          <!-- Dry Run toggle -->
+          <label class="flex items-center gap-2 cursor-pointer select-none">
+            <div class="relative">
+              <input type="checkbox" id="dry-run" class="sr-only peer">
+              <div class="w-9 h-5 bg-slate-200 peer-checked:bg-teal-400 rounded-full transition-colors duration-200"></div>
+              <div class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 peer-checked:translate-x-4"></div>
+            </div>
+            <span class="text-slate-700 font-medium">Dry Run</span>
+            <span class="text-xs text-teal-700 bg-teal-50 border border-teal-200 px-1.5 py-0.5 rounded-full">仅预览</span>
+          </label>
+
+          <!-- 按钮组 -->
+          <div class="ml-auto flex gap-2">
+            <button onclick="viewAuditLog()" id="audit-log-btn"
+              class="flex items-center gap-1.5 border border-slate-200 hover:border-slate-300 text-slate-600 hover:text-slate-800 px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+              <i class="fas fa-scroll"></i> 审计日志
+            </button>
+            <button onclick="deployWhitelist()" id="deploy-btn"
+              class="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              <i class="fas fa-paper-plane"></i> 下发白名单
+            </button>
+          </div>
+        </div>
+
+        <!-- 输出区 -->
+        <div id="output-wrap" class="hidden">
+          <div class="flex items-center justify-between mb-1.5">
+            <span class="text-xs font-medium text-slate-500 uppercase tracking-wide">执行输出</span>
+            <button onclick="clearOutput()" class="text-xs text-slate-400 hover:text-slate-600">
+              <i class="fas fa-xmark"></i> 清除
+            </button>
+          </div>
+          <div class="log-output bg-slate-900 text-slate-100 rounded-lg px-4 py-3 text-xs leading-relaxed overflow-auto max-h-72">
+            <pre id="output-log" class="whitespace-pre-wrap"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── 设置模态框 ──────────────────────────────────────────────── -->
+  <div id="settings-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4">
+    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeSettings()"></div>
+    <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 fade-in">
+      <div class="flex items-center justify-between mb-5">
+        <h3 class="text-base font-semibold text-slate-800">全局设置</h3>
+        <button onclick="closeSettings()" class="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-md hover:bg-slate-100">
+          <i class="fas fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="space-y-5">
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1.5">SSH 端口</label>
+          <input id="s-port" type="number" min="1" max="65535" placeholder="22"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <p class="mt-1 text-xs text-slate-400">目标服务器的 SSH 监听端口，默认 22</p>
+        </div>
+
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-sm font-medium text-slate-700">规则持久化</div>
+            <div class="text-xs text-slate-400 mt-0.5">重启后自动恢复 iptables 规则</div>
+          </div>
+          <label class="flex items-center cursor-pointer">
+            <div class="relative">
+              <input type="checkbox" id="s-persist" class="sr-only peer">
+              <div class="w-10 h-6 bg-slate-200 peer-checked:bg-blue-600 rounded-full transition-colors duration-200"></div>
+              <div class="absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 peer-checked:translate-x-4"></div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-6 pt-4 border-t border-slate-100">
+        <button onclick="closeSettings()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">取消</button>
+        <button onclick="saveSettings()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let CFG = {};
+
+    // ─── 数据加载 ──────────────────────────────────────────────────
+
+    async function loadConfig() {
+      const res = await fetch('/api/config');
+      CFG = await res.json();
+    }
+
+    async function refreshAll() {
+      const icon = document.getElementById('refresh-icon');
+      icon.classList.add('spin');
+      try {
+        await loadConfig();
+        renderWhitelist();
+        renderServers();
+        syncDeploySelect();
+        updateHeaderSummary();
+      } catch (e) {
+        toast('加载失败: ' + e.message, 'error');
+      } finally {
+        icon.classList.remove('spin');
+      }
+    }
+
+    function updateHeaderSummary() {
+      const wl = (CFG.whitelist || []).length;
+      const sv = (CFG.servers || []).length;
+      document.getElementById('header-summary').textContent =
+        `${wl} 个白名单 IP · ${sv} 台服务器`;
+    }
+
+    // ─── 渲染白名单 ────────────────────────────────────────────────
+
+    function renderWhitelist() {
+      const wl = CFG.whitelist || [];
+      document.getElementById('wl-badge').textContent = wl.length;
+
+      const el = document.getElementById('wl-list');
+      if (!wl.length) {
+        el.innerHTML = `
+          <div class="px-5 py-10 text-center text-slate-400">
+            <i class="fas fa-inbox text-3xl block mb-2 opacity-30"></i>
+            白名单为空，请点击"添加 IP"
+          </div>`;
+        return;
+      }
+
+      el.innerHTML = wl.map(e => `
+        <div class="px-5 py-2.5 flex items-center justify-between hover:bg-slate-50 group fade-in">
+          <div class="min-w-0">
+            <span class="font-mono font-semibold text-slate-800">${escHtml(e.ip)}</span>
+            ${e.description
+              ? `<span class="ml-2 text-slate-400">${escHtml(e.description)}</span>`
+              : ''}
+            <div class="text-xs text-slate-300 mt-0.5">
+              ${escHtml(e.added_by || '')}${e.added_at ? ' · ' + escHtml(e.added_at) : ''}
+            </div>
+          </div>
+          <button onclick="removeIP('${escHtml(e.ip)}')"
+            class="opacity-0 group-hover:opacity-100 ml-3 text-red-400 hover:text-red-600 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
+            <i class="fas fa-trash-can text-xs"></i>
+          </button>
+        </div>`).join('');
+    }
+
+    // ─── 渲染服务器 ────────────────────────────────────────────────
+
+    function renderServers() {
+      const servers = CFG.servers || [];
+      document.getElementById('srv-badge').textContent = servers.length;
+
+      const el = document.getElementById('srv-list');
+      if (!servers.length) {
+        el.innerHTML = `
+          <div class="px-5 py-10 text-center text-slate-400">
+            <i class="fas fa-server text-3xl block mb-2 opacity-20"></i>
+            暂无服务器
+            <div class="mt-2 font-mono text-xs bg-slate-100 rounded px-3 py-2 inline-block text-slate-500">
+              python whitelist_manager.py server add &lt;host&gt;
+            </div>
+          </div>`;
+        return;
+      }
+
+      el.innerHTML = servers.map(s => {
+        const authTag = s.key_file
+          ? `<span class="text-xs text-yellow-600 bg-yellow-50 border border-yellow-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-key mr-0.5"></i>密钥</span>`
+          : s.has_password
+          ? `<span class="text-xs text-orange-600 bg-orange-50 border border-orange-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-lock mr-0.5"></i>密码</span>`
+          : `<span class="text-xs text-red-500 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-triangle-exclamation mr-0.5"></i>无认证</span>`;
+
+        return `
+          <div class="px-5 py-3 hover:bg-slate-50 fade-in" id="srv-${escAttr(s.host)}">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <i class="fas fa-circle text-slate-200 text-xs" id="dot-${escAttr(s.host)}"></i>
+                <span class="font-medium text-slate-800">${escHtml(s.name || s.host)}</span>
+              </div>
+              ${authTag}
+            </div>
+            <div class="ml-5 text-xs text-slate-400 mt-0.5">${escHtml(s.user)}@${escHtml(s.host)}:${s.port || 22}</div>
+          </div>`;
+      }).join('');
+    }
+
+    // ─── 同步部署下拉框 ────────────────────────────────────────────
+
+    function syncDeploySelect() {
+      const sel = document.getElementById('deploy-server');
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">全部服务器</option>' +
+        (CFG.servers || []).map(s =>
+          `<option value="${escAttr(s.host)}">${escHtml(s.name || s.host)}</option>`
+        ).join('');
+      if (prev) sel.value = prev;
+    }
+
+    // ─── 添加 / 删除 IP ─────────────────────────────────────────────
+
+    function toggleAddForm() {
+      const form = document.getElementById('add-form');
+      form.classList.toggle('hidden');
+      if (!form.classList.contains('hidden')) {
+        document.getElementById('new-ip').focus();
+      }
+    }
+
+    async function addIP() {
+      const ip = document.getElementById('new-ip').value.trim();
+      const desc = document.getElementById('new-desc').value.trim();
+      if (!ip) return;
+
+      try {
+        const res = await fetch('/api/whitelist', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ip, description: desc }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          document.getElementById('new-ip').value = '';
+          document.getElementById('new-desc').value = '';
+          toast(data.message, 'success');
+          await refreshAll();
+        } else {
+          toast(data.message, 'error');
+        }
+      } catch (e) {
+        toast('操作失败', 'error');
+      }
+    }
+
+    async function removeIP(ip) {
+      if (!confirm(`确认从白名单移除 ${ip}？`)) return;
+      try {
+        const res = await fetch(`/api/whitelist/${encodeURIComponent(ip)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) {
+          toast(data.message, 'success');
+          await refreshAll();
+        } else {
+          toast(data.message, 'error');
+        }
+      } catch (e) {
+        toast('操作失败', 'error');
+      }
+    }
+
+    // ─── 部署 ──────────────────────────────────────────────────────
+
+    async function deployWhitelist() {
+      const server = document.getElementById('deploy-server').value || null;
+      const audit = document.getElementById('audit-mode').checked;
+      const dry_run = document.getElementById('dry-run').checked;
+
+      const btn = document.getElementById('deploy-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> 下发中...';
+
+      showOutput('正在连接服务器，请稍候...\n');
+
+      try {
+        const res = await fetch('/api/deploy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ server, audit, dry_run }),
+        });
+        const data = await res.json();
+
+        if (data.results) {
+          let log = '';
+          data.results.forEach(r => {
+            log += `${'═'.repeat(56)}\n`;
+            log += `  服务器: ${r.server} (${r.host})  ${r.success ? '✓ 成功' : '✗ 失败'}\n`;
+            log += `${'─'.repeat(56)}\n`;
+            log += r.output.trimEnd() + '\n\n';
+          });
+          log += `完成: ${data.success_count}/${data.total} 台成功`;
+          showOutput(log);
+
+          const type = data.success_count === data.total ? 'success'
+            : data.success_count > 0 ? 'warn' : 'error';
+          toast(`部署完成: ${data.success_count}/${data.total} 台成功`, type);
+        } else {
+          showOutput(data.message || '请求失败');
+          toast(data.message || '部署失败', 'error');
+        }
+      } catch (e) {
+        showOutput('[ERROR] ' + e.message);
+        toast('请求失败', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-paper-plane"></i> 下发白名单';
+      }
+    }
+
+    // ─── 状态检查 ──────────────────────────────────────────────────
+
+    async function checkAllStatus() {
+      const btn = document.querySelector('[onclick="checkAllStatus()"]');
+      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> 检查中...';
+      btn.disabled = true;
+
+      // 先把所有圆点变为灰色（检查中）
+      (CFG.servers || []).forEach(s => {
+        const dot = document.getElementById('dot-' + s.host);
+        if (dot) dot.className = 'fas fa-circle text-slate-300 text-xs';
+      });
+
+      showOutput('正在检查各服务器白名单状态...\n');
+
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        if (data.results) {
+          let log = '';
+          data.results.forEach(r => {
+            log += `${'═'.repeat(56)}\n`;
+            log += `  服务器: ${r.server} (${r.host})  ${r.success ? '✓' : '✗'}\n`;
+            log += `${'─'.repeat(56)}\n`;
+            log += r.output.trimEnd() + '\n\n';
+
+            // 更新圆点颜色
+            const dot = document.getElementById('dot-' + r.host);
+            if (dot) {
+              dot.className = r.success
+                ? 'fas fa-circle text-green-400 text-xs'
+                : 'fas fa-circle text-red-400 text-xs';
+            }
+          });
+          showOutput(log.trimEnd());
+        }
+      } catch (e) {
+        toast('状态检查失败', 'error');
+      } finally {
+        btn.innerHTML = '<i class="fas fa-heartbeat"></i> 检查状态';
+        btn.disabled = false;
+      }
+    }
+
+    // ─── 审计日志 ──────────────────────────────────────────────────
+
+    async function viewAuditLog() {
+      const server = document.getElementById('deploy-server').value || '';
+      const btn = document.getElementById('audit-log-btn');
+      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> 加载中...';
+      btn.disabled = true;
+
+      showOutput('正在拉取审计日志...\n');
+
+      try {
+        const qs = server ? `?server=${encodeURIComponent(server)}` : '';
+        const res = await fetch('/api/audit-log' + qs);
+        const data = await res.json();
+
+        if (data.results) {
+          let log = '';
+          data.results.forEach(r => {
+            log += `${'═'.repeat(56)}\n`;
+            log += `  服务器: ${r.server} (${r.host})\n`;
+            log += `${'─'.repeat(56)}\n`;
+            log += r.output.trimEnd() + '\n\n';
+          });
+          showOutput(log.trimEnd() || '（无日志）');
+        } else {
+          showOutput(data.message || '加载失败');
+        }
+      } catch (e) {
+        toast('加载审计日志失败', 'error');
+      } finally {
+        btn.innerHTML = '<i class="fas fa-scroll"></i> 审计日志';
+        btn.disabled = false;
+      }
+    }
+
+    // ─── 输出区 ────────────────────────────────────────────────────
+
+    function showOutput(text) {
+      document.getElementById('output-wrap').classList.remove('hidden');
+      document.getElementById('output-log').textContent = text;
+      document.getElementById('output-log').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    function clearOutput() {
+      document.getElementById('output-wrap').classList.add('hidden');
+      document.getElementById('output-log').textContent = '';
+    }
+
+    // ─── 设置模态框 ────────────────────────────────────────────────
+
+    function openSettings() {
+      const s = CFG.settings || {};
+      document.getElementById('s-port').value = s.ssh_port || 22;
+      document.getElementById('s-persist').checked = s.persist_rules !== false;
+      document.getElementById('settings-modal').classList.remove('hidden');
+    }
+
+    function closeSettings() {
+      document.getElementById('settings-modal').classList.add('hidden');
+    }
+
+    async function saveSettings() {
+      const ssh_port = parseInt(document.getElementById('s-port').value) || 22;
+      const persist_rules = document.getElementById('s-persist').checked;
+
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ssh_port, persist_rules }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          toast('设置已保存', 'success');
+          closeSettings();
+          await refreshAll();
+        } else {
+          toast(data.message || '保存失败', 'error');
+        }
+      } catch (e) {
+        toast('操作失败', 'error');
+      }
+    }
+
+    // ─── Toast ─────────────────────────────────────────────────────
+
+    function toast(msg, type = 'info') {
+      const colors = {
+        success: 'bg-green-600',
+        error: 'bg-red-600',
+        warn: 'bg-amber-500',
+        info: 'bg-blue-600',
+      };
+      const icons = {
+        success: 'fa-circle-check',
+        error: 'fa-circle-xmark',
+        warn: 'fa-triangle-exclamation',
+        info: 'fa-circle-info',
+      };
+      const el = document.createElement('div');
+      el.className = `fade-in flex items-center gap-2 text-white px-4 py-2.5 rounded-lg shadow-lg text-sm ${colors[type] || colors.info}`;
+      el.innerHTML = `<i class="fas ${icons[type] || icons.info}"></i><span>${escHtml(msg)}</span>`;
+      document.getElementById('toasts').appendChild(el);
+      setTimeout(() => {
+        el.style.transition = 'opacity .3s';
+        el.style.opacity = '0';
+        setTimeout(() => el.remove(), 300);
+      }, 3500);
+    }
+
+    // ─── 工具 ──────────────────────────────────────────────────────
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function escAttr(s) {
+      return String(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    // ─── 初始化 ────────────────────────────────────────────────────
+
+    refreshAll();
+  </script>
+</body>
+</html>
