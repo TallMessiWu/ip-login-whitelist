@@ -158,20 +158,23 @@ def cmd_server_list(args):
 
 # ─── 生成远端执行脚本 ─────────────────────────────────────────────────────────
 
-def generate_apply_script(whitelist: list, ssh_port: int, persist: bool) -> str:
+def generate_apply_script(whitelist: list, ssh_port: int, persist: bool, audit: bool = False) -> str:
     ip_list = " ".join(e["ip"] for e in whitelist)
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mode_label = "审计模式（只记录，不拦截）" if audit else "生产模式（真实拦截）"
 
     script = f"""#!/bin/bash
 # IP 登录白名单部署脚本 - 由 whitelist_manager 自动生成
 # 生成时间: {ts}
+# 运行模式: {mode_label}
 
 SSH_PORT={ssh_port}
 WHITELIST_IPS="{ip_list}"
 CHAIN="SSH_WHITELIST"
 PERSIST={str(persist).lower()}
+AUDIT={str(audit).lower()}
 
-echo "=== 开始部署 SSH IP 白名单 ==="
+echo "=== 开始部署 SSH IP 白名单 [{mode_label}] ==="
 echo "服务器: $(hostname)  系统: $(. /etc/os-release 2>/dev/null && echo $NAME $VERSION_ID || uname -r)"
 echo "SSH 端口: $SSH_PORT"
 echo "白名单 IP: $WHITELIST_IPS"
@@ -194,27 +197,46 @@ fi
 
 # ── firewalld 模式（openEuler / CentOS 8+ / RHEL 8+ 默认）────
 if [ "$USE_FIREWALLD" = "true" ]; then
-    # 清理旧的白名单 rich-rule
-    for old_rule in $(firewall-cmd --list-rich-rules 2>/dev/null | grep "SSH_WHITELIST\\|port port=\\"$SSH_PORT\\".*accept"); do
+    # 清理旧的白名单 rich-rule 和审计 log-rule
+    while IFS= read -r old_rule; do
+        [ -z "$old_rule" ] && continue
         firewall-cmd --permanent --remove-rich-rule="$old_rule" &>/dev/null || true
-    done
+    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep "port=\\"$SSH_PORT\\"")
 
-    # 移除默认的 ssh service 开放（若存在），改为精确控制
-    if firewall-cmd --list-services 2>/dev/null | grep -qw ssh; then
-        firewall-cmd --permanent --remove-service=ssh
-        echo "[INFO] 已移除默认 ssh service 开放"
+    if [ "$AUDIT" = "true" ]; then
+        # 审计模式：保留 ssh service 开放（不拦截），仅添加全流量日志规则
+        if ! firewall-cmd --list-services 2>/dev/null | grep -qw ssh; then
+            firewall-cmd --permanent --add-service=ssh
+            echo "[INFO] 已开放 ssh service（审计模式不拦截）"
+        fi
+        # 记录所有 SSH 连接（含白名单和非白名单），用于验证识别效果
+        firewall-cmd --permanent --add-rich-rule="rule family=ipv4 port port=\\"$SSH_PORT\\" protocol=tcp log prefix=\\"SSH_AUDIT: \\" level=\\"warning\\""
+        # 单独记录白名单 IP（日志前缀不同，方便区分）
+        for ip in $WHITELIST_IPS; do
+            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=\\"$ip\\" port port=\\"$SSH_PORT\\" protocol=tcp log prefix=\\"SSH_ALLOWED: \\" level=\\"info\\""
+            echo "[+] 白名单 IP（审计）: $ip"
+        done
+        echo ""
+        echo "[审计模式] 所有 SSH 连接均会放行，但会记录日志："
+        echo "  SSH_ALLOWED: 前缀 = 白名单 IP 的连接"
+        echo "  SSH_AUDIT:   前缀 = 所有 SSH 连接（非白名单的也包含在内）"
+        echo "  查看日志: journalctl -k | grep 'SSH_AUDIT\\|SSH_ALLOWED'"
+    else
+        # 生产模式：移除默认 ssh service，改为精确白名单控制
+        if firewall-cmd --list-services 2>/dev/null | grep -qw ssh; then
+            firewall-cmd --permanent --remove-service=ssh
+            echo "[INFO] 已移除默认 ssh service 开放"
+        fi
+        for ip in $WHITELIST_IPS; do
+            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=\\"$ip\\" port port=\\"$SSH_PORT\\" protocol=tcp accept"
+            echo "[+] 允许 IP: $ip"
+        done
     fi
-
-    # 添加白名单 IP 的 rich-rule
-    for ip in $WHITELIST_IPS; do
-        firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=\\"$ip\\" port port=\\"$SSH_PORT\\" protocol=tcp accept"
-        echo "[+] 允许 IP: $ip"
-    done
 
     firewall-cmd --reload
     echo ""
     echo "[OK] firewalld 规则已应用"
-    echo "当前 SSH 相关规则:"
+    echo "当前 SSH 相关 rich-rule:"
     firewall-cmd --list-rich-rules | grep "$SSH_PORT" || echo "(无 rich-rule)"
     echo "=== 部署完成 ==="
     exit 0
@@ -237,8 +259,18 @@ for ip in $WHITELIST_IPS; do
     echo "[+] 允许 IP: $ip"
 done
 
-# 拒绝其余 SSH 连接
-iptables -A "$CHAIN" -j DROP
+if [ "$AUDIT" = "true" ]; then
+    # 审计模式：对非白名单 IP 只记录日志，不拦截
+    iptables -A "$CHAIN" -j LOG --log-prefix "SSH_BLOCKED: " --log-level 4
+    iptables -A "$CHAIN" -j ACCEPT
+    echo ""
+    echo "[审计模式] 非白名单 IP 的 SSH 连接将被记录但不拦截"
+    echo "  查看日志: journalctl -k | grep 'SSH_BLOCKED'"
+    echo "  或:       grep 'SSH_BLOCKED' /var/log/messages /var/log/syslog 2>/dev/null"
+else
+    # 生产模式：直接拒绝
+    iptables -A "$CHAIN" -j DROP
+fi
 
 # 将 INPUT 链的 SSH 流量导入白名单链
 iptables -D INPUT -p tcp --dport "$SSH_PORT" -j "$CHAIN" 2>/dev/null || true
@@ -278,6 +310,51 @@ fi
 echo "=== 部署完成 ==="
 """
     return script
+
+
+def generate_audit_log_script(ssh_port: int, lines: int) -> str:
+    return f"""#!/bin/bash
+echo "=== SSH 审计日志（最近 {lines} 条）==="
+echo "服务器: $(hostname)  时间: $(date)"
+echo ""
+
+# 从 journald 查（systemd 系统）
+if command -v journalctl &>/dev/null; then
+    echo "─── journalctl（内核日志）───"
+    journalctl -k --no-pager -n 500 2>/dev/null | grep -E "SSH_BLOCKED|SSH_AUDIT|SSH_ALLOWED" | tail -n {lines} || echo "  (无记录)"
+    echo ""
+fi
+
+# 从传统日志文件查（非 systemd 或两者都查）
+for logfile in /var/log/messages /var/log/syslog /var/log/kern.log; do
+    if [ -f "$logfile" ]; then
+        echo "─── $logfile ───"
+        grep -E "SSH_BLOCKED|SSH_AUDIT|SSH_ALLOWED" "$logfile" 2>/dev/null | tail -n {lines} || echo "  (无记录)"
+        echo ""
+    fi
+done
+
+echo "─── 统计摘要 ───"
+ALL_LOGS=$({{ journalctl -k --no-pager -n 5000 2>/dev/null; cat /var/log/messages /var/log/syslog /var/log/kern.log 2>/dev/null; }} | grep -E "SSH_BLOCKED|SSH_AUDIT|SSH_ALLOWED")
+
+BLOCKED=$(echo "$ALL_LOGS" | grep "SSH_BLOCKED" | grep -oE 'SRC=[0-9.]+' | sort | uniq -c | sort -rn)
+ALLOWED=$(echo "$ALL_LOGS" | grep "SSH_ALLOWED" | grep -oE 'SRC=[0-9.]+' | sort | uniq -c | sort -rn)
+AUDIT=$(echo "$ALL_LOGS" | grep "SSH_AUDIT" | grep -oE 'SRC=[0-9.]+' | sort | uniq -c | sort -rn)
+
+if [ -n "$BLOCKED" ]; then
+    echo "被拦截（非白名单）IP 统计:"
+    echo "$BLOCKED" | awk '{{printf "  %-8s 次  %s\\n", $1, $2}}'
+    echo ""
+fi
+if [ -n "$ALLOWED" ]; then
+    echo "白名单 IP 连接统计:"
+    echo "$ALLOWED" | awk '{{printf "  %-8s 次  %s\\n", $1, $2}}'
+    echo ""
+fi
+if [ -z "$BLOCKED" ] && [ -z "$ALLOWED" ] && [ -z "$AUDIT" ]; then
+    echo "  暂无审计日志。请确认已用 --audit 模式部署，且有 SSH 连接产生。"
+fi
+"""
 
 
 def generate_status_script(ssh_port: int) -> str:
@@ -479,7 +556,12 @@ def cmd_deploy(args):
             print("已取消")
             return
 
-    script = generate_apply_script(whitelist, ssh_port, persist)
+    audit = getattr(args, "audit", False)
+    if audit:
+        print("\n[审计模式] 所有 SSH 连接仍可正常登录，非白名单 IP 将被记录到系统日志")
+        print("  验证完成后，用 deploy（不加 --audit）切换为真实拦截\n")
+
+    script = generate_apply_script(whitelist, ssh_port, persist, audit=audit)
 
     success_count = 0
     for server in servers:
@@ -489,6 +571,8 @@ def cmd_deploy(args):
     if not args.dry_run:
         print(f"\n{'='*60}")
         print(f"部署完成: {success_count}/{len(servers)} 台成功")
+        if audit:
+            print("  [提示] 等待一段时间后，用 `audit-log` 命令查看日志验证效果")
 
 
 def cmd_status(args):
@@ -516,6 +600,15 @@ def cmd_remove(args):
             return
 
     script = generate_remove_script(ssh_port)
+    for server in servers:
+        run_on_server(server, script)
+
+
+def cmd_audit_log(args):
+    config = load_config()
+    servers = get_target_servers(config, args.server)
+    ssh_port = config["settings"].get("ssh_port", 22)
+    script = generate_audit_log_script(ssh_port, args.lines)
     for server in servers:
         run_on_server(server, script)
 
@@ -608,6 +701,8 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--server", "-s", help="指定目标服务器（IP 或别名），不指定则下发全部")
     deploy.add_argument("--port", type=int, help="SSH 端口（覆盖全局设置）")
     deploy.add_argument("--dry-run", action="store_true", help="预览脚本，不实际执行")
+    deploy.add_argument("--audit", action="store_true",
+                        help="审计模式：记录应被拦截的 IP 到日志，但不实际拦截，用于上线前验证")
     deploy.add_argument("--yes", "-y", action="store_true", help="跳过确认提示")
     deploy.set_defaults(func=cmd_deploy)
 
@@ -621,6 +716,12 @@ def build_parser() -> argparse.ArgumentParser:
     remove.add_argument("--server", "-s", help="指定服务器，不指定则操作全部")
     remove.add_argument("--yes", "-y", action="store_true", help="跳过确认提示")
     remove.set_defaults(func=cmd_remove)
+
+    # audit-log 命令
+    audit_log = sub.add_parser("audit-log", help="查看审计模式下记录的被拦截 IP 日志")
+    audit_log.add_argument("--server", "-s", help="指定服务器")
+    audit_log.add_argument("--lines", "-n", type=int, default=50, help="显示最近 N 条记录（默认 50）")
+    audit_log.set_defaults(func=cmd_audit_log)
 
     # settings 命令
     settings = sub.add_parser("settings", help="全局设置")

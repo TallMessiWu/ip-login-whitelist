@@ -54,7 +54,34 @@ python whitelist_manager.py server add 10.0.1.2 \
 python whitelist_manager.py server list
 ```
 
-### 第三步：下发白名单
+### 第三步：先用审计模式验证（推荐）
+
+正式拦截前，建议先用 `--audit` 模式测试——所有 SSH 连接仍正常放行，但非白名单 IP 的连接会被写入系统日志，确认识别效果符合预期后再切换为真实拦截。
+
+```bash
+# 部署审计模式（不拦截，只记录）
+python whitelist_manager.py deploy --audit
+
+# 等待一段时间，让各 IP 产生实际连接，然后查看日志
+python whitelist_manager.py audit-log
+
+# 确认无误后，取消 --audit，正式下发拦截规则
+python whitelist_manager.py deploy
+```
+
+`audit-log` 输出示例：
+
+```
+─── 统计摘要 ───
+被拦截（非白名单）IP 统计:
+  15       次  SRC=1.2.3.4
+  3        次  SRC=5.6.7.8
+
+白名单 IP 连接统计:
+  42       次  SRC=192.168.1.100
+```
+
+### 第四步：正式下发拦截规则
 
 ```bash
 # 先预览将执行的脚本（不实际操作）
@@ -102,7 +129,13 @@ python whitelist_manager.py deploy --server 10.0.1.1
 ### 下发与运维
 
 ```bash
-# 下发白名单（支持选项）
+# 审计模式（只记录，不拦截）
+python whitelist_manager.py deploy --audit [--server <IP或别名>]
+
+# 查看审计日志（统计被拦截/放行的 IP）
+python whitelist_manager.py audit-log [--server <IP或别名>] [--lines 100]
+
+# 正式下发拦截规则
 python whitelist_manager.py deploy [--server <IP或别名>] [--port <端口>] [--dry-run] [-y]
 
 # 查看服务器上当前生效的规则
