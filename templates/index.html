@@ -307,7 +307,9 @@
       <div class="space-y-4">
         <div>
           <label class="block text-xs font-medium text-slate-600 mb-1">IP / CIDR</label>
-          <div id="ei-ip-display" class="font-mono text-sm bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-700 select-all"></div>
+          <input id="ei-ip-input" type="text" placeholder="192.168.1.1 或 10.0.0.0/24"
+            class="font-mono w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            onkeydown="if(event.key==='Enter')submitEditIP()">
         </div>
         <div>
           <label class="block text-xs font-medium text-slate-600 mb-1">备注</label>
@@ -789,7 +791,7 @@
 
       document.getElementById('ei-ip').value = ip;
       document.getElementById('ei-scope').value = scope;
-      document.getElementById('ei-ip-display').textContent = ip;
+      document.getElementById('ei-ip-input').value = ip;
       document.getElementById('ei-desc').value = entry.description || '';
       document.getElementById('ei-err').classList.add('hidden');
 
@@ -810,7 +812,7 @@
       }
 
       document.getElementById('edit-ip-modal').classList.remove('hidden');
-      setTimeout(() => document.getElementById('ei-desc').focus(), 50);
+      setTimeout(() => document.getElementById('ei-ip-input').focus(), 50);
     }
 
     function closeEditIPModal() {
@@ -818,14 +820,17 @@
     }
 
     async function submitEditIP() {
-      const ip    = document.getElementById('ei-ip').value;
-      const scope = document.getElementById('ei-scope').value;
-      const desc  = document.getElementById('ei-desc').value.trim();
+      const origIp  = document.getElementById('ei-ip').value;
+      const newIp   = document.getElementById('ei-ip-input').value.trim();
+      const scope   = document.getElementById('ei-scope').value;
+      const desc    = document.getElementById('ei-desc').value.trim();
       const expire_at = getExpireValue('ei-expire-preset', 'ei-expire-custom');
 
+      if (!newIp) { toast('IP 不能为空', 'warn'); return; }
+
       const url = scope
-        ? `/api/servers/${encodeURIComponent(scope)}/whitelist/${encodeURIComponent(ip)}`
-        : `/api/whitelist/${encodeURIComponent(ip)}`;
+        ? `/api/servers/${encodeURIComponent(scope)}/whitelist/${encodeURIComponent(origIp)}`
+        : `/api/whitelist/${encodeURIComponent(origIp)}`;
 
       const errEl = document.getElementById('ei-err');
       errEl.classList.add('hidden');
@@ -834,7 +839,7 @@
         const res = await fetch(url, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ description: desc, expire_at }),
+          body: JSON.stringify({ ip: newIp, description: desc, expire_at }),
         });
         const data = await res.json();
         if (data.success) {

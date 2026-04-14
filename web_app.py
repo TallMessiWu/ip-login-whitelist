@@ -319,13 +319,22 @@ def api_whitelist_remove(ip):
 
 @app.route("/api/whitelist/<path:ip>", methods=["PATCH"])
 def api_whitelist_update(ip):
-    """更新全局白名单条目的备注或有效期。"""
+    """更新全局白名单条目（IP、备注、有效期）。"""
     data = request.json or {}
     cfg = load_config()
 
     entry = next((e for e in cfg["whitelist"] if e["ip"] == ip), None)
     if not entry:
         return jsonify({"success": False, "message": f"{ip} 不在白名单中"}), 404
+
+    if "ip" in data:
+        new_ip = data["ip"].strip()
+        if new_ip != ip:
+            if not validate_ip_or_cidr(new_ip):
+                return jsonify({"success": False, "message": f"无效的 IP 或 CIDR: {new_ip}"}), 400
+            if any(e["ip"] == new_ip for e in cfg["whitelist"]):
+                return jsonify({"success": False, "message": f"{new_ip} 已在白名单中"}), 409
+            entry["ip"] = new_ip
 
     if "description" in data:
         entry["description"] = data["description"].strip()
@@ -338,10 +347,10 @@ def api_whitelist_update(ip):
             except ValueError as e:
                 return jsonify({"success": False, "message": str(e)}), 400
         else:
-            entry.pop("expire_at", None)  # 清空 = 永久
+            entry.pop("expire_at", None)
 
     save_config(cfg)
-    return jsonify({"success": True, "message": f"已更新 {ip}", "entry": entry})
+    return jsonify({"success": True, "message": f"已更新", "entry": entry})
 
 
 # ─── API：服务器管理 ──────────────────────────────────────────────────────────
@@ -459,7 +468,7 @@ def api_server_whitelist_remove(host, ip):
 
 @app.route("/api/servers/<path:host>/whitelist/<path:ip>", methods=["PATCH"])
 def api_server_whitelist_update(host, ip):
-    """更新服务器专属白名单条目的备注或有效期。"""
+    """更新服务器专属白名单条目（IP、备注、有效期）。"""
     data = request.json or {}
     cfg = load_config()
 
@@ -467,9 +476,19 @@ def api_server_whitelist_update(host, ip):
     if not srv:
         return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
 
-    entry = next((e for e in srv.get("whitelist", []) if e["ip"] == ip), None)
+    wl = srv.get("whitelist", [])
+    entry = next((e for e in wl if e["ip"] == ip), None)
     if not entry:
         return jsonify({"success": False, "message": f"{ip} 不在该服务器白名单中"}), 404
+
+    if "ip" in data:
+        new_ip = data["ip"].strip()
+        if new_ip != ip:
+            if not validate_ip_or_cidr(new_ip):
+                return jsonify({"success": False, "message": f"无效的 IP 或 CIDR: {new_ip}"}), 400
+            if any(e["ip"] == new_ip for e in wl):
+                return jsonify({"success": False, "message": f"{new_ip} 已在该服务器白名单中"}), 409
+            entry["ip"] = new_ip
 
     if "description" in data:
         entry["description"] = data["description"].strip()
@@ -485,7 +504,7 @@ def api_server_whitelist_update(host, ip):
             entry.pop("expire_at", None)
 
     save_config(cfg)
-    return jsonify({"success": True, "message": f"已更新 {ip}", "entry": entry})
+    return jsonify({"success": True, "message": f"已更新", "entry": entry})
 
 
 # ─── API：设置 ────────────────────────────────────────────────────────────────
