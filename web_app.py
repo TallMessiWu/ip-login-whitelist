@@ -446,8 +446,8 @@ def api_audit_log():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="IP 白名单管理 Web 界面")
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
-    parser.add_argument("--port", type=int, default=8080, help="监听端口（默认 8080）")
+    parser.add_argument("--host", default="0.0.0.0", help="监听地址（默认 0.0.0.0）")
+    parser.add_argument("--port", type=int, default=6969, help="监听端口（默认 6969）")
     parser.add_argument("--debug", action="store_true", help="开启 Flask 调试模式")
     args = parser.parse_args()
 
