@@ -841,17 +841,26 @@ def cmd_deploy(args):
     config = load_config()
     whitelist = config["whitelist"]
 
-    if not whitelist:
-        print("[ERROR] 白名单为空！部署后将阻断所有 SSH 连接，请先用 `ip add` 添加允许的 IP。")
-        sys.exit(1)
-
     servers = get_target_servers(config, args.server)
     ssh_port = args.port or config["settings"].get("ssh_port", 22)
     persist = config["settings"].get("persist_rules", True)
 
-    print(f"\n[安全检查] 当前白名单共 {len(whitelist)} 个 IP:")
-    for e in whitelist:
-        print(f"  - {e['ip']}  {e.get('description','')}")
+    # 预先计算每台服务器的合并白名单，基于合并结果做安全检查和显示
+    server_merged_map = {id(s): get_merged_whitelist(s, whitelist) for s in servers}
+
+    if all(not m for m in server_merged_map.values()):
+        print("[ERROR] 白名单为空！部署后将阻断所有 SSH 连接，请先用 `ip add` 添加允许的 IP。")
+        sys.exit(1)
+
+    print(f"\n[安全检查] 各服务器实际下发白名单（全局 + 专属）:")
+    for s in servers:
+        merged = server_merged_map[id(s)]
+        label = f"{s.get('name', s['host'])} ({s['host']})"
+        server_ips = {e["ip"] for e in s.get("whitelist", [])}
+        print(f"  服务器: {label}  共 {len(merged)} 个 IP")
+        for e in merged:
+            tag = " [专属]" if e["ip"] in server_ips else ""
+            print(f"    - {e['ip']}{tag}  {e.get('description', '')}")
 
     print(f"\n将部署到 {len(servers)} 台服务器:")
     for s in servers:
@@ -863,8 +872,7 @@ def cmd_deploy(args):
     locked_out_servers = []
     if my_ip:
         for s in servers:
-            merged = get_merged_whitelist(s, whitelist)
-            if not ip_covered_by_whitelist(my_ip, merged):
+            if not ip_covered_by_whitelist(my_ip, server_merged_map[id(s)]):
                 locked_out_servers.append(s)
         if locked_out_servers:
             print(f"\n{'!'*60}")
@@ -897,7 +905,7 @@ def cmd_deploy(args):
 
     success_count = 0
     for server in servers:
-        merged = get_merged_whitelist(server, whitelist)
+        merged = server_merged_map[id(server)]
         script = generate_apply_script(merged, ssh_port, persist, audit=audit)
         if run_on_server(server, script, dry_run=args.dry_run, config=config):
             success_count += 1
