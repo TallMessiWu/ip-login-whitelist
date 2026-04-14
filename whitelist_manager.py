@@ -520,7 +520,7 @@ def run_on_server(server: dict, script: str, dry_run: bool = False, config: dict
         import paramiko
         return _run_via_paramiko(host, port, user, key_file, password, script, proxy, interactive=interactive)
     except ImportError:
-        return _run_via_subprocess(host, port, user, key_file, script, proxy)
+        return _run_via_subprocess(host, port, user, key_file, password, script, proxy)
 
 
 def _make_proxy_sock(proxy: str, host: str, port: int):
@@ -618,6 +618,31 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
     if needs_password:
         connect_kwargs["password"] = _password_cache[cache_key]
 
+    # 覆盖 paramiko 内置的 keyboard-interactive handler（默认实现直接调用
+    # getpass.getpass，会在终端弹出密码提示，完全绕过 interactive=False 判断）。
+    # 用配置的密码静默回应 keyboard-interactive 挑战；若无密码则在非交互模式下
+    # 直接拒绝，避免意外阻塞 Web 请求。
+    _pwd_for_kbd = _password_cache.get(cache_key, "")
+
+    def _kbd_handler(title, instructions, prompts):
+        if _pwd_for_kbd:
+            return [_pwd_for_kbd for _ in prompts]
+        if not interactive:
+            raise paramiko.AuthenticationException("keyboard-interactive: no password configured for non-interactive mode")
+        answers = []
+        if title:
+            print(title.strip())
+        if instructions:
+            print(instructions.strip())
+        for prompt, show_input in prompts:
+            if show_input:
+                answers.append(input(prompt.strip()))
+            else:
+                answers.append(getpass.getpass(prompt.strip()))
+        return answers
+
+    client._interactive_handler = _kbd_handler  # type: ignore[attr-defined]
+
     password_updated = False  # 标记是否在认证失败后重新输入了新密码
 
     for attempt in range(2):  # 最多重试一次（认证失败时重新输入）
@@ -635,9 +660,11 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
             new_pwd = getpass.getpass(f"  请重新输入 {user}@{host} 的密码: ")
             _password_cache[cache_key] = new_pwd
             connect_kwargs["password"] = new_pwd
+            _pwd_for_kbd = new_pwd
             password_updated = True
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client._interactive_handler = _kbd_handler  # type: ignore[attr-defined]
         except Exception as e:
             print(f"[ERROR] 连接 {host} 失败: {e}")
             return False
@@ -685,10 +712,43 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
         client.close()
 
 
-def _run_via_subprocess(host, port, user, key_file, script, proxy="") -> bool:
+def _run_via_subprocess(host, port, user, key_file, password, script, proxy="") -> bool:
+    import platform, tempfile
+
+    # 有密码时用 SSH_ASKPASS 静默传递，避免 ssh 打开 /dev/tty 弹交互框；
+    # 无密码时加 BatchMode=yes，遇到需要密码的服务器直接报错而非卡住。
+    askpass_file = None
+    env = None
+
+    if password and not key_file:
+        try:
+            is_win = platform.system() == "Windows"
+            suffix = ".bat" if is_win else ".sh"
+            fd, askpass_file = tempfile.mkstemp(suffix=suffix)
+            if is_win:
+                with os.fdopen(fd, "w") as f:
+                    f.write("@echo off\r\necho %_SSHPWD%\r\n")
+            else:
+                with os.fdopen(fd, "w") as f:
+                    f.write("#!/bin/sh\necho \"$_SSHPWD\"\n")
+                os.chmod(askpass_file, 0o700)
+
+            env = os.environ.copy()
+            env["SSH_ASKPASS"] = askpass_file
+            env["SSH_ASKPASS_REQUIRE"] = "force"   # OpenSSH 8.4+，不依赖 DISPLAY
+            env["_SSHPWD"] = password
+        except Exception as e:
+            print(f"[WARN] 无法创建 SSH_ASKPASS 脚本: {e}，回退到无密码模式")
+            if askpass_file and os.path.exists(askpass_file):
+                os.unlink(askpass_file)
+            askpass_file = None
+            env = None
+
     cmd = ["ssh", "-p", str(port),
            "-o", "StrictHostKeyChecking=accept-new",
            "-o", "ConnectTimeout=30"]
+    if not env:  # 无法传递密码时启用 BatchMode，防止终端挂起等待输入
+        cmd += ["-o", "BatchMode=yes"]
     if proxy:
         nc_cmd = _proxy_to_nc_command(proxy)
         if nc_cmd:
@@ -700,7 +760,9 @@ def _run_via_subprocess(host, port, user, key_file, script, proxy="") -> bool:
     cmd += [f"{user}@{host}", "bash -s"]
 
     try:
-        result = subprocess.run(cmd, input=script.encode(), capture_output=True, timeout=60)
+        result = subprocess.run(
+            cmd, input=script.encode(), capture_output=True, timeout=60, env=env
+        )
         print(result.stdout.decode("utf-8", errors="replace"))
         if result.stderr.strip():
             print(f"[STDERR] {result.stderr.decode('utf-8', errors='replace')}")
@@ -717,6 +779,12 @@ def _run_via_subprocess(host, port, user, key_file, script, proxy="") -> bool:
     except Exception as e:
         print(f"[ERROR] 执行失败: {e}")
         return False
+    finally:
+        if askpass_file and os.path.exists(askpass_file):
+            try:
+                os.unlink(askpass_file)
+            except OSError:
+                pass
 
 
 # ─── 部署命令 ─────────────────────────────────────────────────────────────────
