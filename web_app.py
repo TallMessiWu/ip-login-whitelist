@@ -283,8 +283,6 @@ def api_deploy():
     data = request.json or {}
     cfg = load_config()
 
-    if not cfg["whitelist"]:
-        return jsonify({"success": False, "message": "白名单为空，部署会阻断所有 SSH 连接，请先添加 IP"}), 400
     if not cfg["servers"]:
         return jsonify({"success": False, "message": "服务器列表为空，请先用 CLI 添加服务器"}), 400
 
@@ -298,13 +296,21 @@ def api_deploy():
         if not servers:
             return jsonify({"success": False, "message": f"未找到服务器: {server_filter}"}), 404
 
+    # 预先计算每台服务器的合并白名单（全局 + 专属）
+    global_whitelist = cfg["whitelist"]
+    server_merged_map = {id(s): get_merged_whitelist(s, global_whitelist) for s in servers}
+
+    if all(not m for m in server_merged_map.values()):
+        return jsonify({"success": False, "message": "白名单为空，部署会阻断所有 SSH 连接，请先添加 IP"}), 400
+
     ssh_port = cfg["settings"].get("ssh_port", 22)
     persist = cfg["settings"].get("persist_rules", True)
-    script = generate_apply_script(cfg["whitelist"], ssh_port, persist, audit=audit)
 
     results = []
     success_count = 0
     for server in servers:
+        merged = server_merged_map[id(server)]
+        script = generate_apply_script(merged, ssh_port, persist, audit=audit)
         ok, output = capture_run(server, script, dry_run=dry_run, config=cfg)
         if ok:
             success_count += 1
