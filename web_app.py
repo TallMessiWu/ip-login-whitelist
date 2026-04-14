@@ -28,6 +28,7 @@ from whitelist_manager import (
     generate_apply_script, generate_status_script,
     generate_remove_script, generate_audit_log_script,
     run_on_server, get_merged_whitelist, _find_server, _make_ip_entry,
+    ip_covered_by_whitelist,
 )
 
 app = Flask(__name__)
@@ -236,6 +237,36 @@ def api_settings():
 
     save_config(cfg)
     return jsonify({"success": True, "settings": cfg["settings"]})
+
+
+# ─── API：部署安全自检 ────────────────────────────────────────────────────────
+
+@app.route("/api/check-my-ip")
+def api_check_my_ip():
+    """检测浏览器客户端 IP 是否在目标服务器白名单中。"""
+    cfg = load_config()
+    # 取客户端真实 IP（兼容反代）
+    client_ip = (
+        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or request.remote_addr
+        or ""
+    )
+    server_filter = request.args.get("server") or None
+    servers = cfg["servers"]
+    if server_filter:
+        servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
+
+    locked_out = []
+    for s in servers:
+        merged = get_merged_whitelist(s, cfg["whitelist"])
+        if not ip_covered_by_whitelist(client_ip, merged):
+            locked_out.append({"host": s["host"], "name": s.get("name", s["host"])})
+
+    return jsonify({
+        "client_ip": client_ip,
+        "safe": len(locked_out) == 0,
+        "locked_out_servers": locked_out,
+    })
 
 
 # ─── API：下发白名单 ───────────────────────────────────────────────────────────

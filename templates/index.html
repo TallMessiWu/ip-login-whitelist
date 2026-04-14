@@ -716,6 +716,26 @@
       const audit = document.getElementById('audit-mode').checked;
       const dry_run = document.getElementById('dry-run').checked;
 
+      // 安全自检：确认本机 IP 在白名单中
+      if (!dry_run) {
+        try {
+          const checkUrl = '/api/check-my-ip' + (server ? `?server=${encodeURIComponent(server)}` : '');
+          const checkRes = await fetch(checkUrl);
+          const checkData = await checkRes.json();
+          if (!checkData.safe) {
+            const serverNames = checkData.locked_out_servers.map(s => `${s.name} (${s.host})`).join('、');
+            const confirmed = confirm(
+              `⚠️ 危险操作警告\n\n检测到你的当前 IP ${checkData.client_ip} 不在以下服务器的白名单中：\n${serverNames}\n\n部署后你将无法通过 SSH 登录这些服务器！\n\n确定仍要继续吗？`
+            );
+            if (!confirmed) return;
+          }
+        } catch (e) {
+          // 检测失败不阻断，但提示用户
+          const confirmed = confirm('⚠️ 无法自动检测本机 IP，请确认你的 IP 已加入白名单后再继续。\n\n是否继续部署？');
+          if (!confirmed) return;
+        }
+      }
+
       const btn = document.getElementById('deploy-btn');
       btn.disabled = true;
       btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> 下发中...';
