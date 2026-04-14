@@ -324,6 +324,42 @@
             </div>
           </label>
         </div>
+
+        <!-- 过期自动下发 -->
+        <div class="border-t border-slate-100 pt-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <div class="text-sm font-medium text-slate-700">过期自动下发</div>
+              <div class="text-xs text-slate-400 mt-0.5">条目到期时自动同步规则到服务器</div>
+            </div>
+            <label class="flex items-center cursor-pointer">
+              <div class="relative">
+                <input type="checkbox" id="s-auto-deploy" class="sr-only peer"
+                  onchange="toggleAutoDeployConfig()">
+                <div class="w-10 h-6 bg-slate-200 peer-checked:bg-green-500 rounded-full transition-colors duration-200"></div>
+                <div class="absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 peer-checked:translate-x-4"></div>
+              </div>
+            </label>
+          </div>
+
+          <div id="auto-deploy-config" class="hidden mt-3 space-y-2">
+            <div class="flex items-center gap-2">
+              <label class="text-xs text-slate-600 whitespace-nowrap">检查间隔</label>
+              <select id="s-auto-deploy-interval"
+                class="border border-slate-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-green-500 bg-white">
+                <option value="1">1 分钟</option>
+                <option value="5">5 分钟</option>
+                <option value="15">15 分钟</option>
+                <option value="30">30 分钟</option>
+                <option value="60">1 小时</option>
+              </select>
+            </div>
+            <div id="scheduler-status-box"
+              class="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 space-y-0.5">
+              加载中...
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="flex justify-end gap-2 mt-6 pt-4 border-t border-slate-100">
@@ -955,11 +991,53 @@
 
     // ─── 设置模态框 ────────────────────────────────────────────────
 
-    function openSettings() {
+    async function openSettings() {
       const s = CFG.settings || {};
       document.getElementById('s-port').value = s.ssh_port || 22;
       document.getElementById('s-persist').checked = s.persist_rules !== false;
+
+      // 加载调度器状态
+      try {
+        const res = await fetch('/api/scheduler');
+        const sched = await res.json();
+        document.getElementById('s-auto-deploy').checked = sched.enabled;
+        const sel = document.getElementById('s-auto-deploy-interval');
+        sel.value = String(sched.interval_minutes || 5);
+        renderSchedulerStatus(sched);
+        toggleAutoDeployConfig();
+      } catch (e) { /* ignore */ }
+
       document.getElementById('settings-modal').classList.remove('hidden');
+    }
+
+    function toggleAutoDeployConfig() {
+      const enabled = document.getElementById('s-auto-deploy').checked;
+      const cfg = document.getElementById('auto-deploy-config');
+      enabled ? cfg.classList.remove('hidden') : cfg.classList.add('hidden');
+    }
+
+    function renderSchedulerStatus(sched) {
+      const box = document.getElementById('scheduler-status-box');
+      if (!box) return;
+      let html = '';
+      if (sched.last_run_at) {
+        html += `<div>上次检查: <span class="text-slate-700">${escHtml(sched.last_run_at)}</span></div>`;
+      }
+      if (sched.last_expired && sched.last_expired.length) {
+        html += `<div class="text-amber-600">上次触发下发: ${sched.last_expired.map(escHtml).join(', ')}</div>`;
+        if (sched.last_results && sched.last_results.length) {
+          sched.last_results.forEach(r => {
+            const icon = r.success ? '✓' : '✗';
+            const cls = r.success ? 'text-green-600' : 'text-red-500';
+            html += `<div class="${cls}">${icon} ${escHtml(r.server)}</div>`;
+          });
+        }
+      } else if (sched.last_run_at) {
+        html += `<div class="text-slate-400">上次检查无过期条目</div>`;
+      } else {
+        html += `<div class="text-slate-400">尚未运行</div>`;
+      }
+      box.innerHTML = html || '加载中...';
     }
 
     function closeSettings() {
@@ -969,20 +1047,30 @@
     async function saveSettings() {
       const ssh_port = parseInt(document.getElementById('s-port').value) || 22;
       const persist_rules = document.getElementById('s-persist').checked;
+      const auto_deploy_enabled = document.getElementById('s-auto-deploy').checked;
+      const interval_minutes = parseInt(document.getElementById('s-auto-deploy-interval').value) || 5;
 
       try {
-        const res = await fetch('/api/settings', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ssh_port, persist_rules }),
-        });
-        const data = await res.json();
-        if (data.success) {
+        const [r1, r2] = await Promise.all([
+          fetch('/api/settings', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ssh_port, persist_rules }),
+          }),
+          fetch('/api/scheduler', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: auto_deploy_enabled, interval_minutes }),
+          }),
+        ]);
+        const d1 = await r1.json();
+        const d2 = await r2.json();
+        if (d1.success && d2.success) {
           toast('设置已保存', 'success');
           closeSettings();
           await refreshAll();
         } else {
-          toast(data.message || '保存失败', 'error');
+          toast((d1.message || d2.message || '保存失败'), 'error');
         }
       } catch (e) {
         toast('操作失败', 'error');

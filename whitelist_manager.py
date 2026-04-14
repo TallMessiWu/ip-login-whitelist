@@ -27,7 +27,11 @@ DEFAULT_CONFIG = {
     "settings": {
         "ssh_port": 22,
         "persist_rules": True,
-        "proxy": ""
+        "proxy": "",
+        "auto_deploy": {
+            "enabled": False,
+            "interval_minutes": 5
+        }
     }
 }
 

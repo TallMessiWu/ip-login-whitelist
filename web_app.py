@@ -10,6 +10,9 @@ IP 白名单管理 Web 界面
 
 import sys
 import io
+import json
+import time
+import threading
 import datetime
 import getpass
 import argparse
@@ -29,9 +32,209 @@ from whitelist_manager import (
     generate_remove_script, generate_audit_log_script,
     run_on_server, get_merged_whitelist, _find_server, _make_ip_entry,
     ip_covered_by_whitelist, get_outgoing_ip, parse_expire,
+    is_entry_expired, CONFIG_FILE,
 )
 
 app = Flask(__name__)
+
+
+# ─── 自动下发调度器 ────────────────────────────────────────────────────────────
+
+_sched_lock = threading.Lock()
+_sched: dict = {
+    "enabled": False,
+    "interval_minutes": 5,
+    "thread": None,
+    "last_run_at": None,
+    "last_expired": [],    # 上次触发的过期条目摘要
+    "last_results": [],    # 上次下发结果
+}
+
+
+def _find_affected_servers(raw_cfg: dict) -> set:
+    """扫描原始 config，返回受过期条目影响的服务器 host 集合。
+    全局条目过期 → 所有服务器；专属条目过期 → 该服务器。"""
+    affected = set()
+    all_hosts = {s["host"] for s in raw_cfg.get("servers", [])}
+
+    for e in raw_cfg.get("whitelist", []):
+        if is_entry_expired(e):
+            return all_hosts          # 全局过期 → 全部受影响，直接返回
+
+    for srv in raw_cfg.get("servers", []):
+        for e in srv.get("whitelist", []):
+            if is_entry_expired(e):
+                affected.add(srv["host"])
+
+    return affected
+
+
+def _scheduler_run_once():
+    """调度器单次执行：检查过期 → 下发受影响服务器。"""
+    with _sched_lock:
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _sched["last_run_at"] = now_str
+
+        try:
+            if not CONFIG_FILE.exists():
+                _sched["last_expired"] = []
+                _sched["last_results"] = []
+                return
+
+            # ① 读原始 config（不触发 load_config 的自动清除写盘），找出过期条目
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                raw_cfg = json.load(f)
+
+            # 收集过期条目摘要（用于日志展示）
+            expired_summary = []
+            for e in raw_cfg.get("whitelist", []):
+                if is_entry_expired(e):
+                    expired_summary.append(f"[全局] {e['ip']}")
+            for srv in raw_cfg.get("servers", []):
+                for e in srv.get("whitelist", []):
+                    if is_entry_expired(e):
+                        expired_summary.append(f"[{srv.get('name', srv['host'])}] {e['ip']}")
+
+            _sched["last_expired"] = expired_summary
+
+            if not expired_summary:
+                _sched["last_results"] = []
+                return
+
+            affected_hosts = _find_affected_servers(raw_cfg)
+
+            # ② load_config 触发清除 + 写盘
+            cfg = load_config()
+
+            # ③ 对受影响的服务器重新下发
+            ssh_port = cfg["settings"].get("ssh_port", 22)
+            persist = cfg["settings"].get("persist_rules", True)
+            results = []
+
+            for server in cfg["servers"]:
+                if server["host"] not in affected_hosts:
+                    continue
+                merged = get_merged_whitelist(server, cfg["whitelist"])
+                if not merged:
+                    results.append({
+                        "server": server.get("name", server["host"]),
+                        "host": server["host"],
+                        "success": False,
+                        "output": "[SKIP] 白名单已全空，跳过自动下发（防止锁死服务器）",
+                    })
+                    continue
+
+                buf = io.StringIO()
+                try:
+                    script = generate_apply_script(merged, ssh_port, persist)
+                    with redirect_stdout(buf):
+                        ok = run_on_server(server, script, config=cfg, interactive=False)
+                except Exception as exc:
+                    ok = False
+                    buf.write(f"[ERROR] {exc}\n")
+
+                results.append({
+                    "server": server.get("name", server["host"]),
+                    "host": server["host"],
+                    "success": ok,
+                    "output": buf.getvalue(),
+                })
+
+            _sched["last_results"] = results
+
+        except Exception as exc:
+            _sched["last_expired"] = []
+            _sched["last_results"] = [{"server": "—", "host": "—", "success": False,
+                                        "output": f"[ERROR] 调度器异常: {exc}"}]
+
+
+def _scheduler_loop():
+    """后台线程主循环。"""
+    while _sched["enabled"]:
+        interval = max(1, _sched["interval_minutes"]) * 60
+        # 分段 sleep，使 enabled=False 时能及时退出
+        for _ in range(interval):
+            if not _sched["enabled"]:
+                return
+            time.sleep(1)
+        if _sched["enabled"]:
+            _scheduler_run_once()
+
+
+def _start_scheduler():
+    """启动调度器后台线程（幂等：已启动则不重复创建）。"""
+    t = _sched.get("thread")
+    if t and t.is_alive():
+        return
+    _sched["enabled"] = True
+    t = threading.Thread(target=_scheduler_loop, daemon=True, name="whitelist-scheduler")
+    _sched["thread"] = t
+    t.start()
+
+
+def _stop_scheduler():
+    """停止调度器（通过 enabled=False 让线程自然退出）。"""
+    _sched["enabled"] = False
+    _sched["thread"] = None
+
+
+def _init_scheduler_from_config():
+    """服务启动时，读取 config.json 中的 auto_deploy 设置并初始化调度器。"""
+    try:
+        cfg = load_config()
+        ad = cfg.get("settings", {}).get("auto_deploy", {})
+        if ad.get("enabled"):
+            _sched["interval_minutes"] = int(ad.get("interval_minutes", 5))
+            _start_scheduler()
+    except Exception:
+        pass
+
+
+# ─── API：调度器管理 ───────────────────────────────────────────────────────────
+
+@app.route("/api/scheduler", methods=["GET"])
+def api_scheduler_get():
+    t = _sched.get("thread")
+    return jsonify({
+        "enabled": _sched["enabled"] and bool(t and t.is_alive()),
+        "interval_minutes": _sched["interval_minutes"],
+        "last_run_at": _sched["last_run_at"],
+        "last_expired": _sched["last_expired"],
+        "last_results": _sched["last_results"],
+    })
+
+
+@app.route("/api/scheduler", methods=["PATCH"])
+def api_scheduler_patch():
+    data = request.json or {}
+    cfg = load_config()
+    ad = cfg.setdefault("settings", {}).setdefault("auto_deploy", {})
+
+    if "enabled" in data:
+        enabled = bool(data["enabled"])
+        ad["enabled"] = enabled
+        if enabled:
+            if "interval_minutes" in data:
+                mins = max(1, int(data["interval_minutes"]))
+                _sched["interval_minutes"] = mins
+                ad["interval_minutes"] = mins
+            _start_scheduler()
+        else:
+            _stop_scheduler()
+
+    if "interval_minutes" in data and not ("enabled" in data and not data["enabled"]):
+        mins = max(1, int(data["interval_minutes"]))
+        _sched["interval_minutes"] = mins
+        ad["interval_minutes"] = mins
+        # 如果已启动，重启线程使新间隔生效
+        if _sched["enabled"]:
+            _stop_scheduler()
+            time.sleep(0.1)
+            _start_scheduler()
+
+    save_config(cfg)
+    return jsonify({"success": True, "enabled": _sched["enabled"],
+                    "interval_minutes": _sched["interval_minutes"]})
 
 
 # ─── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -450,6 +653,8 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=6969, help="监听端口（默认 6969）")
     parser.add_argument("--debug", action="store_true", help="开启 Flask 调试模式")
     args = parser.parse_args()
+
+    _init_scheduler_from_config()
 
     url = f"http://{args.host}:{args.port}"
     print(f"[OK] 启动 Web 界面: {url}")
