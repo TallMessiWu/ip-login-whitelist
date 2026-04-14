@@ -168,6 +168,10 @@
               class="flex items-center gap-1.5 border border-slate-200 hover:border-slate-300 text-slate-600 hover:text-slate-800 px-4 py-2 rounded-lg text-sm font-medium transition-colors">
               <i class="fas fa-scroll"></i> 审计日志
             </button>
+            <button onclick="removeWhitelist()" id="remove-btn"
+              class="flex items-center gap-1.5 border border-red-200 hover:border-red-300 text-red-600 hover:text-red-800 hover:bg-red-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              <i class="fas fa-shield-xmark"></i> 取消白名单
+            </button>
             <button onclick="deployWhitelist()" id="deploy-btn"
               class="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
               <i class="fas fa-paper-plane"></i> 下发白名单
@@ -750,6 +754,59 @@
       } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-paper-plane"></i> 下发白名单';
+      }
+    }
+
+    // ─── 取消白名单 ────────────────────────────────────────────────
+
+    async function removeWhitelist() {
+      const server = document.getElementById('deploy-server').value || null;
+      const dry_run = document.getElementById('dry-run').checked;
+
+      const targetLabel = server
+        ? (CFG.servers || []).find(s => s.host === server)?.name || server
+        : '全部服务器';
+
+      if (!dry_run && !confirm(`确认从「${targetLabel}」移除 SSH 白名单限制？\n\n移除后该服务器将允许所有 IP 登录，请确认这是你的意图。`)) return;
+
+      const btn = document.getElementById('remove-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> 移除中...';
+
+      showOutput('正在连接服务器，移除白名单规则...\n');
+
+      try {
+        const res = await fetch('/api/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ server, dry_run }),
+        });
+        const data = await res.json();
+
+        if (data.results) {
+          let log = '';
+          data.results.forEach(r => {
+            log += `${'═'.repeat(56)}\n`;
+            log += `  服务器: ${r.server} (${r.host})  ${r.success ? '✓ 成功' : '✗ 失败'}\n`;
+            log += `${'─'.repeat(56)}\n`;
+            log += r.output.trimEnd() + '\n\n';
+          });
+          log += `完成: ${data.success_count}/${data.total} 台成功`;
+          showOutput(log);
+
+          const type = data.success_count === data.total ? 'success'
+            : data.success_count > 0 ? 'warn' : 'error';
+          toast(`取消白名单: ${data.success_count}/${data.total} 台成功`, type);
+        } else {
+          showOutput(data.message || '请求失败');
+          toast(data.message || '操作失败', 'error');
+        }
+      } catch (e) {
+        showOutput('[ERROR] ' + e.message);
+        toast('请求失败', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-shield-xmark"></i> 取消白名单';
       }
     }
 

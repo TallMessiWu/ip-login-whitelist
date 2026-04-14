@@ -285,6 +285,49 @@ def api_deploy():
     })
 
 
+# ─── API：取消白名单 ──────────────────────────────────────────────────────────
+
+@app.route("/api/remove", methods=["POST"])
+def api_remove():
+    data = request.json or {}
+    cfg = load_config()
+
+    if not cfg["servers"]:
+        return jsonify({"success": False, "message": "服务器列表为空"}), 400
+
+    server_filter = data.get("server") or None
+    dry_run = bool(data.get("dry_run", False))
+
+    servers = cfg["servers"]
+    if server_filter:
+        servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
+        if not servers:
+            return jsonify({"success": False, "message": f"未找到服务器: {server_filter}"}), 404
+
+    ssh_port = cfg["settings"].get("ssh_port", 22)
+    script = generate_remove_script(ssh_port)
+
+    results = []
+    success_count = 0
+    for server in servers:
+        ok, output = capture_run(server, script, dry_run=dry_run, config=cfg)
+        if ok:
+            success_count += 1
+        results.append({
+            "server": server.get("name", server["host"]),
+            "host": server["host"],
+            "success": ok,
+            "output": output,
+        })
+
+    return jsonify({
+        "success": success_count > 0,
+        "success_count": success_count,
+        "total": len(servers),
+        "results": results,
+    })
+
+
 # ─── API：服务器状态 ───────────────────────────────────────────────────────────
 
 @app.route("/api/status")
