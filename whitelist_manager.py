@@ -716,6 +716,41 @@ def _run_via_subprocess(host, port, user, key_file, script, proxy="") -> bool:
 
 # ─── 部署命令 ─────────────────────────────────────────────────────────────────
 
+def get_outgoing_ip(target_host: str = None) -> str | None:
+    """检测本机连接目标服务器时使用的出口 IP。优先用 socket trick，回退到公网 API。"""
+    import socket
+    if target_host:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((target_host, 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            pass
+    try:
+        from urllib.request import urlopen
+        return urlopen("https://api.ipify.org", timeout=5).read().decode().strip()
+    except Exception:
+        pass
+    return None
+
+
+def ip_covered_by_whitelist(ip_str: str, whitelist: list) -> bool:
+    """检查 ip_str 是否被白名单任一条目覆盖（支持 CIDR）。"""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    for entry in whitelist:
+        try:
+            if addr in ipaddress.ip_network(entry["ip"], strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def get_target_servers(config: dict, host_filter: str = None) -> list:
     servers = config["servers"]
     if not servers:
@@ -749,7 +784,34 @@ def cmd_deploy(args):
     for s in servers:
         print(f"  - {s.get('name','')} ({s['host']}:{s.get('port',22)})")
 
-    if not args.yes and not args.dry_run:
+    # 自检：检测本机出口 IP 是否在每台目标服务器的白名单中
+    first_host = servers[0]["host"] if servers else None
+    my_ip = get_outgoing_ip(first_host)
+    locked_out_servers = []
+    if my_ip:
+        for s in servers:
+            merged = get_merged_whitelist(s, whitelist)
+            if not ip_covered_by_whitelist(my_ip, merged):
+                locked_out_servers.append(s)
+        if locked_out_servers:
+            print(f"\n{'!'*60}")
+            print(f"[危险] 检测到本机出口 IP {my_ip} 不在以下服务器的白名单中：")
+            for s in locked_out_servers:
+                print(f"  - {s.get('name','')} ({s['host']})")
+            print("  部署后你将无法通过 SSH 登录这些服务器！")
+            print(f"  建议先执行：python whitelist_manager.py ip add {my_ip} --desc \"我的IP\"")
+            print(f"{'!'*60}")
+            if not args.yes and not args.dry_run:
+                confirm = input("\n已了解风险，仍要继续部署？[y/N]: ").strip().lower()
+                if confirm != "y":
+                    print("已取消")
+                    return
+        else:
+            print(f"\n[OK] 本机出口 IP {my_ip} 已在白名单中，安全")
+    else:
+        print("\n[WARN] 无法自动检测本机出口 IP，请手动确认自己的 IP 已加入白名单")
+
+    if not args.yes and not args.dry_run and not locked_out_servers:
         confirm = input("\n确认部署？白名单外的 IP 将被拒绝 SSH 登录 [y/N]: ").strip().lower()
         if confirm != "y":
             print("已取消")
