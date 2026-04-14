@@ -400,7 +400,7 @@ echo ""
 # 从 journald 查（systemd 系统）
 if command -v journalctl &>/dev/null; then
     echo "─── journalctl（内核日志）───"
-    journalctl -k --no-pager -n 500 2>/dev/null | grep -E "SSH_BLOCKED|SSH_AUDIT|SSH_ALLOWED" | tail -n {lines} || echo "  (无记录)"
+    journalctl -k --no-pager -n 2000 2>/dev/null | grep -E "SSH_BLOCKED|SSH_AUDIT|SSH_ALLOWED" | tail -n {lines} || echo "  (无记录)"
     echo ""
 fi
 
@@ -408,13 +408,13 @@ fi
 for logfile in /var/log/messages /var/log/syslog /var/log/kern.log; do
     if [ -f "$logfile" ]; then
         echo "─── $logfile ───"
-        grep -E "SSH_BLOCKED|SSH_AUDIT|SSH_ALLOWED" "$logfile" 2>/dev/null | tail -n {lines} || echo "  (无记录)"
+        tail -n 5000 "$logfile" | grep -E "SSH_BLOCKED|SSH_AUDIT|SSH_ALLOWED" | tail -n {lines} || echo "  (无记录)"
         echo ""
     fi
 done
 
 echo "─── 统计摘要 ───"
-ALL_LOGS=$({{ journalctl -k --no-pager -n 5000 2>/dev/null; cat /var/log/messages /var/log/syslog /var/log/kern.log 2>/dev/null; }} | grep -E "SSH_BLOCKED|SSH_AUDIT|SSH_ALLOWED")
+ALL_LOGS=$({{ journalctl -k --no-pager -n 2000 2>/dev/null; tail -n 5000 /var/log/messages /var/log/syslog /var/log/kern.log 2>/dev/null; }} | grep -E "SSH_BLOCKED|SSH_AUDIT|SSH_ALLOWED")
 
 BLOCKED=$(echo "$ALL_LOGS" | grep "SSH_BLOCKED" | grep -oE 'SRC=[0-9.]+' | sort | uniq -c | sort -rn)
 ALLOWED=$(echo "$ALL_LOGS" | grep "SSH_ALLOWED" | grep -oE 'SRC=[0-9.]+' | sort | uniq -c | sort -rn)
@@ -660,7 +660,12 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
         stdin.write(script)
         stdin.channel.shutdown_write()
 
-        output = stdout.read().decode("utf-8", errors="replace")
+        stdout.channel.settimeout(120)  # 最长等待 120 秒，防止大日志输出卡死
+        try:
+            output = stdout.read().decode("utf-8", errors="replace")
+        except Exception:
+            output = "[WARN] 读取输出超时，脚本可能仍在执行\n"
+
         err_output = stderr.read().decode("utf-8", errors="replace")
         print(output)
         if err_output.strip():
