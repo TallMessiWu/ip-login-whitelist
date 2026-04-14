@@ -74,7 +74,7 @@
             <input id="new-desc" type="text" placeholder="备注"
               class="w-28 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
               onkeydown="if(event.key==='Enter')addIP()">
-            <select id="new-expire-preset" onchange="onExpirePresetChange('new-expire-custom')"
+            <select id="new-expire-preset" onchange="onExpirePresetChange(this, 'new-expire-custom')"
               class="border border-slate-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
               <option value="">永久</option>
               <option value="1d">1天</option>
@@ -523,7 +523,7 @@
                 <input id="swl-desc-${escAttr(s.host)}" type="text" placeholder="备注"
                   class="w-20 border border-indigo-200 rounded-md px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
                   onkeydown="if(event.key==='Enter')addServerIP('${escAttr(s.host)}')">
-                <select id="swl-expire-${escAttr(s.host)}" onchange="onExpirePresetChange('swl-expire-custom-${escAttr(s.host)}')"
+                <select id="swl-expire-${escAttr(s.host)}" onchange="onExpirePresetChange(this, 'swl-expire-custom-${escAttr(s.host)}')"
                   class="border border-indigo-200 rounded-md px-1.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white">
                   <option value="">永久</option>
                   <option value="1d">1天</option>
@@ -1119,21 +1119,10 @@
     }
 
     /** 切换自定义日期框的显示 */
-    function onExpirePresetChange(customId) {
-      // 查找 select：customId 遵循 "{selectId}" 约定，从 event 中找 select
-      // 由于 onchange 写在 select 上，直接用 event
+    function onExpirePresetChange(selectEl, customId) {
       const customEl = document.getElementById(customId);
       if (!customEl) return;
-      // find the corresponding select by replacing 'custom' suffix pattern
-      const selectId = customId.replace('-custom', '');
-      // Actually the select triggers onchange itself, so we can't rely on event here.
-      // Let's handle it differently: scan all selects with "expire" in id
-      // We pass the customId, we need to check the select value.
-      // The select id is derived: customId = presetId.replace(/-custom$/, '') + '-custom'
-      // → presetId = customId.replace(/-custom$/, '')
-      const presetId = customId.replace(/-custom$/, '');
-      const presetEl = document.getElementById(presetId);
-      if (presetEl && presetEl.value === 'custom') {
+      if (selectEl.value === 'custom') {
         customEl.classList.remove('hidden');
         customEl.focus();
       } else {
