@@ -317,6 +317,33 @@ def api_whitelist_remove(ip):
     return jsonify({"success": True, "message": f"已移除 {ip}"})
 
 
+@app.route("/api/whitelist/<path:ip>", methods=["PATCH"])
+def api_whitelist_update(ip):
+    """更新全局白名单条目的备注或有效期。"""
+    data = request.json or {}
+    cfg = load_config()
+
+    entry = next((e for e in cfg["whitelist"] if e["ip"] == ip), None)
+    if not entry:
+        return jsonify({"success": False, "message": f"{ip} 不在白名单中"}), 404
+
+    if "description" in data:
+        entry["description"] = data["description"].strip()
+
+    if "expire_at" in data:
+        raw = (data["expire_at"] or "").strip()
+        if raw:
+            try:
+                entry["expire_at"] = parse_expire(raw)
+            except ValueError as e:
+                return jsonify({"success": False, "message": str(e)}), 400
+        else:
+            entry.pop("expire_at", None)  # 清空 = 永久
+
+    save_config(cfg)
+    return jsonify({"success": True, "message": f"已更新 {ip}", "entry": entry})
+
+
 # ─── API：服务器管理 ──────────────────────────────────────────────────────────
 
 @app.route("/api/servers", methods=["POST"])
@@ -428,6 +455,37 @@ def api_server_whitelist_remove(host, ip):
 
     save_config(cfg)
     return jsonify({"success": True, "message": f"已移除 {ip}"})
+
+
+@app.route("/api/servers/<path:host>/whitelist/<path:ip>", methods=["PATCH"])
+def api_server_whitelist_update(host, ip):
+    """更新服务器专属白名单条目的备注或有效期。"""
+    data = request.json or {}
+    cfg = load_config()
+
+    srv = _find_server(cfg, host)
+    if not srv:
+        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+
+    entry = next((e for e in srv.get("whitelist", []) if e["ip"] == ip), None)
+    if not entry:
+        return jsonify({"success": False, "message": f"{ip} 不在该服务器白名单中"}), 404
+
+    if "description" in data:
+        entry["description"] = data["description"].strip()
+
+    if "expire_at" in data:
+        raw = (data["expire_at"] or "").strip()
+        if raw:
+            try:
+                entry["expire_at"] = parse_expire(raw)
+            except ValueError as e:
+                return jsonify({"success": False, "message": str(e)}), 400
+        else:
+            entry.pop("expire_at", None)
+
+    save_config(cfg)
+    return jsonify({"success": True, "message": f"已更新 {ip}", "entry": entry})
 
 
 # ─── API：设置 ────────────────────────────────────────────────────────────────

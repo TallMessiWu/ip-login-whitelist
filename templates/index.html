@@ -292,6 +292,55 @@
     </div>
   </div>
 
+  <!-- ── 编辑白名单条目模态框 ──────────────────────────────────── -->
+  <div id="edit-ip-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4">
+    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeEditIPModal()"></div>
+    <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 fade-in">
+      <div class="flex items-center justify-between mb-5">
+        <h3 class="text-base font-semibold text-slate-800">编辑白名单条目</h3>
+        <button onclick="closeEditIPModal()" class="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-md hover:bg-slate-100">
+          <i class="fas fa-xmark"></i>
+        </button>
+      </div>
+      <input type="hidden" id="ei-ip">
+      <input type="hidden" id="ei-scope">
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1">IP / CIDR</label>
+          <div id="ei-ip-display" class="font-mono text-sm bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-700 select-all"></div>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1">备注</label>
+          <input id="ei-desc" type="text" placeholder="可选备注"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            onkeydown="if(event.key==='Enter')submitEditIP()">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1">有效期</label>
+          <div class="flex gap-2">
+            <select id="ei-expire-preset" onchange="onExpirePresetChange(this, 'ei-expire-custom')"
+              class="flex-1 border border-slate-300 rounded-lg px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+              <option value="">永久</option>
+              <option value="1d">1天</option>
+              <option value="7d">7天</option>
+              <option value="30d">30天</option>
+              <option value="90d">90天</option>
+              <option value="custom">自定义...</option>
+            </select>
+            <input id="ei-expire-custom" type="datetime-local"
+              class="hidden flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <p id="ei-current-expire" class="mt-1 text-xs text-slate-400"></p>
+        </div>
+      </div>
+      <div id="ei-err" class="hidden mt-3 text-xs text-red-500 bg-red-50 rounded-lg px-3 py-2"></div>
+      <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-100">
+        <button onclick="closeEditIPModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">取消</button>
+        <button onclick="submitEditIP()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">保存</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── 设置模态框 ──────────────────────────────────────────────── -->
   <div id="settings-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4">
     <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeSettings()"></div>
@@ -432,10 +481,18 @@
               ${escHtml(e.added_by || '')}${e.added_at ? ' · ' + escHtml(e.added_at) : ''}
             </div>
           </div>
-          <button onclick="removeIP('${escHtml(e.ip)}')"
-            class="opacity-0 group-hover:opacity-100 ml-3 text-red-400 hover:text-red-600 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
-            <i class="fas fa-trash-can text-xs"></i>
-          </button>
+          <div class="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 ml-2 flex-shrink-0 transition-all">
+            <button onclick="openEditIPModal('${escAttr(e.ip)}', '')"
+              class="text-blue-400 hover:text-blue-600 hover:bg-blue-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
+              title="编辑">
+              <i class="fas fa-pen text-xs"></i>
+            </button>
+            <button onclick="removeIP('${escAttr(e.ip)}')"
+              class="text-red-400 hover:text-red-600 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
+              title="删除">
+              <i class="fas fa-trash-can text-xs"></i>
+            </button>
+          </div>
         </div>`).join('');
     }
 
@@ -469,15 +526,23 @@
 
         const swlRows = swl.map(e => `
           <div class="flex items-center justify-between py-1 group">
-            <div class="flex items-center gap-1.5 flex-wrap min-w-0">
+            <div class="flex items-center gap-1.5 flex-wrap min-w-0 flex-1">
               <span class="font-mono text-xs text-slate-700">${escHtml(e.ip)}</span>
               ${e.description ? `<span class="text-xs text-slate-400">${escHtml(e.description)}</span>` : ''}
               ${renderExpireBadge(e.expire_at, true)}
             </div>
-            <button onclick="removeServerIP('${escAttr(s.host)}','${escAttr(e.ip)}')"
-              class="opacity-0 group-hover:opacity-100 flex-shrink-0 text-red-400 hover:text-red-600 w-6 h-6 flex items-center justify-center rounded transition-all">
-              <i class="fas fa-xmark text-xs"></i>
-            </button>
+            <div class="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 flex-shrink-0 transition-all">
+              <button onclick="openEditIPModal('${escAttr(e.ip)}','${escAttr(s.host)}')"
+                class="text-blue-400 hover:text-blue-600 w-5 h-5 flex items-center justify-center rounded transition-colors"
+                title="编辑">
+                <i class="fas fa-pen" style="font-size:10px"></i>
+              </button>
+              <button onclick="removeServerIP('${escAttr(s.host)}','${escAttr(e.ip)}')"
+                class="text-red-400 hover:text-red-600 w-5 h-5 flex items-center justify-center rounded transition-colors"
+                title="删除">
+                <i class="fas fa-xmark" style="font-size:10px"></i>
+              </button>
+            </div>
           </div>`).join('');
 
         return `
@@ -706,6 +771,88 @@
         }
       } catch (e) {
         toast('操作失败', 'error');
+      }
+    }
+
+    // ─── 编辑白名单条目 ────────────────────────────────────────────
+
+    function openEditIPModal(ip, scope) {
+      // 从内存中找当前条目数据
+      let entry;
+      if (scope) {
+        const srv = (CFG.servers || []).find(s => s.host === scope);
+        entry = srv ? (srv.whitelist || []).find(e => e.ip === ip) : null;
+      } else {
+        entry = (CFG.whitelist || []).find(e => e.ip === ip);
+      }
+      if (!entry) { toast('找不到该条目', 'error'); return; }
+
+      document.getElementById('ei-ip').value = ip;
+      document.getElementById('ei-scope').value = scope;
+      document.getElementById('ei-ip-display').textContent = ip;
+      document.getElementById('ei-desc').value = entry.description || '';
+      document.getElementById('ei-err').classList.add('hidden');
+
+      const preset = document.getElementById('ei-expire-preset');
+      const custom = document.getElementById('ei-expire-custom');
+      const hint   = document.getElementById('ei-current-expire');
+
+      if (entry.expire_at) {
+        // 当前有过期时间：默认显示自定义输入框并填入当前值
+        preset.value = 'custom';
+        custom.value = entry.expire_at.replace(' ', 'T').substring(0, 16);
+        custom.classList.remove('hidden');
+        hint.textContent = `当前到期时间: ${entry.expire_at}`;
+      } else {
+        preset.value = '';
+        custom.classList.add('hidden');
+        hint.textContent = '当前设置: 永久';
+      }
+
+      document.getElementById('edit-ip-modal').classList.remove('hidden');
+      setTimeout(() => document.getElementById('ei-desc').focus(), 50);
+    }
+
+    function closeEditIPModal() {
+      document.getElementById('edit-ip-modal').classList.add('hidden');
+    }
+
+    async function submitEditIP() {
+      const ip    = document.getElementById('ei-ip').value;
+      const scope = document.getElementById('ei-scope').value;
+      const desc  = document.getElementById('ei-desc').value.trim();
+      const expire_at = getExpireValue('ei-expire-preset', 'ei-expire-custom');
+
+      const url = scope
+        ? `/api/servers/${encodeURIComponent(scope)}/whitelist/${encodeURIComponent(ip)}`
+        : `/api/whitelist/${encodeURIComponent(ip)}`;
+
+      const errEl = document.getElementById('ei-err');
+      errEl.classList.add('hidden');
+
+      try {
+        const res = await fetch(url, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ description: desc, expire_at }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          closeEditIPModal();
+          toast(data.message, 'success');
+          await refreshAll();
+          // 如果是专属白名单，刷新后重新展开面板
+          if (scope) {
+            const el = document.getElementById('swl-' + scope);
+            if (el) el.classList.remove('hidden');
+          }
+        } else {
+          errEl.textContent = data.message;
+          errEl.classList.remove('hidden');
+        }
+      } catch (e) {
+        errEl.textContent = '请求失败: ' + e.message;
+        errEl.classList.remove('hidden');
       }
     }
 
