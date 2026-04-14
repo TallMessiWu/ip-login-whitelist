@@ -28,7 +28,7 @@ from whitelist_manager import (
     generate_apply_script, generate_status_script,
     generate_remove_script, generate_audit_log_script,
     run_on_server, get_merged_whitelist, _find_server, _make_ip_entry,
-    ip_covered_by_whitelist,
+    ip_covered_by_whitelist, get_outgoing_ip,
 )
 
 app = Flask(__name__)
@@ -243,18 +243,25 @@ def api_settings():
 
 @app.route("/api/check-my-ip")
 def api_check_my_ip():
-    """检测浏览器客户端 IP 是否在目标服务器白名单中。"""
+    """检测本机出口 IP 是否在目标服务器白名单中。"""
     cfg = load_config()
-    # 取客户端真实 IP（兼容反代）
-    client_ip = (
-        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        or request.remote_addr
-        or ""
-    )
     server_filter = request.args.get("server") or None
     servers = cfg["servers"]
     if server_filter:
         servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
+
+    # 优先取 X-Forwarded-For（反代场景），否则取 remote_addr
+    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    http_client_ip = forwarded or request.remote_addr or ""
+
+    # 若客户端是 localhost，说明 Web 界面本地访问，需探测真实出口 IP
+    localhost_addrs = {"127.0.0.1", "::1", "localhost"}
+    if http_client_ip in localhost_addrs:
+        first_host = servers[0]["host"] if servers else None
+        real_ip = get_outgoing_ip(first_host)
+        client_ip = real_ip or http_client_ip
+    else:
+        client_ip = http_client_ip
 
     locked_out = []
     for s in servers:
