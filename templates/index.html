@@ -67,13 +67,24 @@
 
         <!-- 添加表单 -->
         <div id="add-form" class="hidden px-5 py-3 bg-blue-50 border-b border-blue-100">
-          <div class="flex gap-2">
+          <div class="flex gap-2 flex-wrap">
             <input id="new-ip" type="text" placeholder="IP 或 CIDR，如 192.168.1.1 / 10.0.0.0/24"
-              class="flex-1 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              class="flex-1 min-w-40 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
               onkeydown="if(event.key==='Enter')addIP()">
             <input id="new-desc" type="text" placeholder="备注"
               class="w-28 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
               onkeydown="if(event.key==='Enter')addIP()">
+            <select id="new-expire-preset" onchange="onExpirePresetChange('new-expire-custom')"
+              class="border border-slate-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+              <option value="">永久</option>
+              <option value="1d">1天</option>
+              <option value="7d">7天</option>
+              <option value="30d">30天</option>
+              <option value="90d">90天</option>
+              <option value="custom">自定义...</option>
+            </select>
+            <input id="new-expire-custom" type="datetime-local"
+              class="hidden border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
             <button onclick="addIP()"
               class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-sm transition-colors">添加</button>
             <button onclick="toggleAddForm()"
@@ -373,11 +384,14 @@
 
       el.innerHTML = wl.map(e => `
         <div class="px-5 py-2.5 flex items-center justify-between hover:bg-slate-50 group fade-in">
-          <div class="min-w-0">
-            <span class="font-mono font-semibold text-slate-800">${escHtml(e.ip)}</span>
-            ${e.description
-              ? `<span class="ml-2 text-slate-400">${escHtml(e.description)}</span>`
-              : ''}
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-mono font-semibold text-slate-800">${escHtml(e.ip)}</span>
+              ${e.description
+                ? `<span class="text-slate-400">${escHtml(e.description)}</span>`
+                : ''}
+              ${renderExpireBadge(e.expire_at)}
+            </div>
             <div class="text-xs text-slate-300 mt-0.5">
               ${escHtml(e.added_by || '')}${e.added_at ? ' · ' + escHtml(e.added_at) : ''}
             </div>
@@ -419,12 +433,13 @@
 
         const swlRows = swl.map(e => `
           <div class="flex items-center justify-between py-1 group">
-            <div>
+            <div class="flex items-center gap-1.5 flex-wrap min-w-0">
               <span class="font-mono text-xs text-slate-700">${escHtml(e.ip)}</span>
-              ${e.description ? `<span class="ml-1.5 text-xs text-slate-400">${escHtml(e.description)}</span>` : ''}
+              ${e.description ? `<span class="text-xs text-slate-400">${escHtml(e.description)}</span>` : ''}
+              ${renderExpireBadge(e.expire_at, true)}
             </div>
             <button onclick="removeServerIP('${escAttr(s.host)}','${escAttr(e.ip)}')"
-              class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 w-6 h-6 flex items-center justify-center rounded transition-all">
+              class="opacity-0 group-hover:opacity-100 flex-shrink-0 text-red-400 hover:text-red-600 w-6 h-6 flex items-center justify-center rounded transition-all">
               <i class="fas fa-xmark text-xs"></i>
             </button>
           </div>`).join('');
@@ -465,13 +480,24 @@
               <div id="swl-rows-${escAttr(s.host)}" class="space-y-0.5 mb-2">
                 ${swlRows || '<div class="text-xs text-slate-400 py-1">暂无专属 IP</div>'}
               </div>
-              <div class="flex gap-2">
+              <div class="flex gap-2 flex-wrap">
                 <input id="swl-ip-${escAttr(s.host)}" type="text" placeholder="添加 IP / CIDR"
-                  class="flex-1 border border-indigo-200 rounded-md px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
+                  class="flex-1 min-w-32 border border-indigo-200 rounded-md px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
                   onkeydown="if(event.key==='Enter')addServerIP('${escAttr(s.host)}')">
                 <input id="swl-desc-${escAttr(s.host)}" type="text" placeholder="备注"
-                  class="w-24 border border-indigo-200 rounded-md px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
+                  class="w-20 border border-indigo-200 rounded-md px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
                   onkeydown="if(event.key==='Enter')addServerIP('${escAttr(s.host)}')">
+                <select id="swl-expire-${escAttr(s.host)}" onchange="onExpirePresetChange('swl-expire-custom-${escAttr(s.host)}')"
+                  class="border border-indigo-200 rounded-md px-1.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white">
+                  <option value="">永久</option>
+                  <option value="1d">1天</option>
+                  <option value="7d">7天</option>
+                  <option value="30d">30天</option>
+                  <option value="90d">90天</option>
+                  <option value="custom">自定义...</option>
+                </select>
+                <input id="swl-expire-custom-${escAttr(s.host)}" type="datetime-local"
+                  class="hidden border border-indigo-200 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white">
                 <button onclick="addServerIP('${escAttr(s.host)}')"
                   class="bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-1 rounded-md text-xs transition-colors">添加</button>
               </div>
@@ -606,12 +632,13 @@
     async function addServerIP(host) {
       const ip = document.getElementById('swl-ip-' + host).value.trim();
       const desc = document.getElementById('swl-desc-' + host).value.trim();
+      const expire_at = getExpireValue('swl-expire-' + host, 'swl-expire-custom-' + host);
       if (!ip) return;
       try {
         const res = await fetch(`/api/servers/${encodeURIComponent(host)}/whitelist`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ip, description: desc }),
+          body: JSON.stringify({ ip, description: desc, expire_at }),
         });
         const data = await res.json();
         if (data.success) {
@@ -671,18 +698,21 @@
     async function addIP() {
       const ip = document.getElementById('new-ip').value.trim();
       const desc = document.getElementById('new-desc').value.trim();
+      const expire_at = getExpireValue('new-expire-preset', 'new-expire-custom');
       if (!ip) return;
 
       try {
         const res = await fetch('/api/whitelist', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ip, description: desc }),
+          body: JSON.stringify({ ip, description: desc, expire_at }),
         });
         const data = await res.json();
         if (data.success) {
           document.getElementById('new-ip').value = '';
           document.getElementById('new-desc').value = '';
+          document.getElementById('new-expire-preset').value = '';
+          document.getElementById('new-expire-custom').classList.add('hidden');
           toast(data.message, 'success');
           await refreshAll();
         } else {
@@ -983,6 +1013,83 @@
         el.style.opacity = '0';
         setTimeout(() => el.remove(), 300);
       }, 3500);
+    }
+
+    // ─── 时效工具 ──────────────────────────────────────────────────
+
+    /** 根据 preset select + custom datetime-local input 取出 expire_at 字符串 */
+    function getExpireValue(presetId, customId) {
+      const preset = document.getElementById(presetId);
+      const custom = document.getElementById(customId);
+      if (!preset) return '';
+      const val = preset.value;
+      if (!val) return '';
+      if (val === 'custom') {
+        return (custom && custom.value) ? custom.value : '';
+      }
+      return val;  // e.g. "7d", "30d"
+    }
+
+    /** 切换自定义日期框的显示 */
+    function onExpirePresetChange(customId) {
+      // 查找 select：customId 遵循 "{selectId}" 约定，从 event 中找 select
+      // 由于 onchange 写在 select 上，直接用 event
+      const customEl = document.getElementById(customId);
+      if (!customEl) return;
+      // find the corresponding select by replacing 'custom' suffix pattern
+      const selectId = customId.replace('-custom', '');
+      // Actually the select triggers onchange itself, so we can't rely on event here.
+      // Let's handle it differently: scan all selects with "expire" in id
+      // We pass the customId, we need to check the select value.
+      // The select id is derived: customId = presetId.replace(/-custom$/, '') + '-custom'
+      // → presetId = customId.replace(/-custom$/, '')
+      const presetId = customId.replace(/-custom$/, '');
+      const presetEl = document.getElementById(presetId);
+      if (presetEl && presetEl.value === 'custom') {
+        customEl.classList.remove('hidden');
+        customEl.focus();
+      } else {
+        customEl.classList.add('hidden');
+      }
+    }
+
+    /** 计算并渲染有效期 badge */
+    function renderExpireBadge(expire_at, small = false) {
+      if (!expire_at) {
+        return `<span class="text-xs text-slate-300 ${small ? '' : 'px-1.5 py-0.5'}">永久</span>`;
+      }
+      const exp = new Date(expire_at.replace(' ', 'T'));
+      const now = new Date();
+      const diffMs = exp - now;
+      const diffDays = diffMs / 86400000;
+
+      if (diffMs <= 0) {
+        return `<span class="text-xs font-medium text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-full">
+          <i class="fas fa-clock-rotate-left mr-0.5"></i>已过期</span>`;
+      }
+
+      let color, label;
+      if (diffDays < 1) {
+        const hrs = Math.ceil(diffMs / 3600000);
+        color = 'text-red-600 bg-red-50 border-red-200';
+        label = `${hrs}小时后过期`;
+      } else if (diffDays < 7) {
+        const d = Math.ceil(diffDays);
+        color = 'text-orange-600 bg-orange-50 border-orange-200';
+        label = `${d}天后过期`;
+      } else if (diffDays < 30) {
+        const d = Math.ceil(diffDays);
+        color = 'text-amber-600 bg-amber-50 border-amber-200';
+        label = `${d}天后过期`;
+      } else {
+        // Show date
+        const dateStr = exp.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric', year: 'numeric' });
+        color = 'text-green-600 bg-green-50 border-green-200';
+        label = `至 ${dateStr}`;
+      }
+
+      return `<span class="text-xs font-medium ${color} border px-1.5 py-0.5 rounded-full" title="${escHtml(expire_at)}">
+        <i class="fas fa-hourglass-half mr-0.5"></i>${label}</span>`;
     }
 
     // ─── 工具 ──────────────────────────────────────────────────────

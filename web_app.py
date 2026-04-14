@@ -28,7 +28,7 @@ from whitelist_manager import (
     generate_apply_script, generate_status_script,
     generate_remove_script, generate_audit_log_script,
     run_on_server, get_merged_whitelist, _find_server, _make_ip_entry,
-    ip_covered_by_whitelist, get_outgoing_ip,
+    ip_covered_by_whitelist, get_outgoing_ip, parse_expire,
 )
 
 app = Flask(__name__)
@@ -83,16 +83,19 @@ def api_whitelist_add():
     if not validate_ip_or_cidr(ip):
         return jsonify({"success": False, "message": f"无效的 IP 或 CIDR 格式: {ip}"}), 400
 
+    expire_at = None
+    raw_expire = (data.get("expire_at") or "").strip()
+    if raw_expire:
+        try:
+            expire_at = parse_expire(raw_expire)
+        except ValueError as e:
+            return jsonify({"success": False, "message": str(e)}), 400
+
     cfg = load_config()
     if ip in [e["ip"] for e in cfg["whitelist"]]:
         return jsonify({"success": False, "message": f"{ip} 已在白名单中"}), 409
 
-    entry = {
-        "ip": ip,
-        "description": description,
-        "added_by": getpass.getuser(),
-        "added_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    entry = _make_ip_entry(ip, description, expire_at)
     cfg["whitelist"].append(entry)
     save_config(cfg)
     return jsonify({"success": True, "message": f"已添加 {ip}", "entry": entry})
@@ -185,6 +188,14 @@ def api_server_whitelist_add(host):
     if not validate_ip_or_cidr(ip):
         return jsonify({"success": False, "message": f"无效的 IP 或 CIDR: {ip}"}), 400
 
+    expire_at = None
+    raw_expire = (data.get("expire_at") or "").strip()
+    if raw_expire:
+        try:
+            expire_at = parse_expire(raw_expire)
+        except ValueError as e:
+            return jsonify({"success": False, "message": str(e)}), 400
+
     cfg = load_config()
     srv = _find_server(cfg, host)
     if not srv:
@@ -194,7 +205,7 @@ def api_server_whitelist_add(host):
     if any(e["ip"] == ip for e in wl):
         return jsonify({"success": False, "message": f"{ip} 已在该服务器白名单中"}), 409
 
-    entry = _make_ip_entry(ip, description)
+    entry = _make_ip_entry(ip, description, expire_at)
     wl.append(entry)
     save_config(cfg)
     return jsonify({"success": True, "message": f"已添加 {ip}", "entry": entry})

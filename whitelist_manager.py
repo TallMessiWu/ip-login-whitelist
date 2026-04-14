@@ -6,6 +6,7 @@ IP Login Whitelist Manager
 
 import json
 import os
+import re
 import sys
 import argparse
 import datetime
@@ -48,7 +49,15 @@ def _resolve_proxy(server: dict, config: dict) -> str:
 def load_config() -> dict:
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, encoding="utf-8") as f:
-            return json.load(f)
+            config = json.load(f)
+        removed = purge_expired_entries(config)
+        if removed:
+            # 静默回写，不触发 save_config 的 "[OK] 配置已保存" 提示
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            for scope, e in removed:
+                print(f"[INFO] 已自动清除过期白名单: [{scope}] {e['ip']} (过期于 {e['expire_at']})")
+        return config
     return json.loads(json.dumps(DEFAULT_CONFIG))
 
 
@@ -66,6 +75,81 @@ def validate_ip_or_cidr(ip_str: str) -> bool:
         return False
 
 
+# ─── 时效管理 ────────────────────────────────────────────────────────────────
+
+_EXPIRE_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def parse_expire(expire_str: str) -> str | None:
+    """解析过期时间字符串，返回 '%Y-%m-%d %H:%M:%S' 格式，或 None（永久）。
+
+    支持格式：
+      - 留空 / 'never' / '永久' → 永久（返回 None）
+      - '7d' / '24h' / '30m'   → 相对于当前时刻的相对时间
+      - '2025-12-31'            → 当天结束（23:59:59）
+      - '2025-12-31 23:59:59'   → 绝对时间
+      - '2025-12-31T23:59'      → datetime-local 格式（来自 HTML input）
+    """
+    if not expire_str or expire_str.strip().lower() in ('', 'never', '永久', 'permanent'):
+        return None
+    s = expire_str.strip()
+    m = re.match(r'^(\d+)([dhm])$', s.lower())
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        delta = {'d': datetime.timedelta(days=n),
+                 'h': datetime.timedelta(hours=n),
+                 'm': datetime.timedelta(minutes=n)}[unit]
+        return (datetime.datetime.now() + delta).strftime(_EXPIRE_FMT)
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.datetime.strptime(s, fmt).strftime(_EXPIRE_FMT)
+        except ValueError:
+            continue
+    try:
+        # 仅日期：设为当天 23:59:59
+        return datetime.datetime.strptime(s, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59).strftime(_EXPIRE_FMT)
+    except ValueError:
+        pass
+    raise ValueError(
+        f"无效的过期时间格式: {expire_str!r}，"
+        "支持：7d / 24h / 30m / 2025-12-31 / 2025-12-31 23:59:59"
+    )
+
+
+def is_entry_expired(entry: dict) -> bool:
+    """判断白名单条目是否已过期。无 expire_at 字段视为永久有效。"""
+    expire_at = entry.get("expire_at")
+    if not expire_at:
+        return False
+    try:
+        return datetime.datetime.now() > datetime.datetime.strptime(expire_at, _EXPIRE_FMT)
+    except (ValueError, TypeError):
+        return False
+
+
+def purge_expired_entries(config: dict) -> list:
+    """清除 config 中已过期的白名单条目（原地修改）。
+    返回被清除的条目列表，每项为 (scope: str, entry: dict)。"""
+    removed = []
+
+    valid, expired = [], []
+    for e in config.get("whitelist", []):
+        (expired if is_entry_expired(e) else valid).append(e)
+    config["whitelist"] = valid
+    removed.extend(("全局", e) for e in expired)
+
+    for srv in config.get("servers", []):
+        valid, expired = [], []
+        for e in srv.get("whitelist", []):
+            (expired if is_entry_expired(e) else valid).append(e)
+        srv["whitelist"] = valid
+        scope = srv.get("name") or srv["host"]
+        removed.extend((scope, e) for e in expired)
+
+    return removed
+
+
 # ─── IP 白名单管理 ────────────────────────────────────────────────────────────
 
 def _find_server(config: dict, host_or_name: str) -> dict | None:
@@ -76,21 +160,24 @@ def _find_server(config: dict, host_or_name: str) -> dict | None:
     return None
 
 
-def _make_ip_entry(ip: str, desc: str) -> dict:
-    return {
+def _make_ip_entry(ip: str, desc: str, expire_at: str = None) -> dict:
+    entry = {
         "ip": ip,
         "description": desc or "",
         "added_by": getpass.getuser(),
         "added_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    if expire_at:
+        entry["expire_at"] = expire_at
+    return entry
 
 
 def get_merged_whitelist(server: dict, global_whitelist: list) -> list:
-    """合并全局白名单与服务器专属白名单（去重）。"""
+    """合并全局白名单与服务器专属白名单（去重、过滤已过期）。"""
     seen = set()
     merged = []
     for entry in global_whitelist + server.get("whitelist", []):
-        if entry["ip"] not in seen:
+        if entry["ip"] not in seen and not is_entry_expired(entry):
             seen.add(entry["ip"])
             merged.append(entry)
     return merged
@@ -104,6 +191,15 @@ def cmd_ip_add(args):
         print(f"[ERROR] 无效的 IP 或 CIDR 格式: {ip}")
         sys.exit(1)
 
+    expire_at = None
+    if getattr(args, 'expire', None):
+        try:
+            expire_at = parse_expire(args.expire)
+        except ValueError as e:
+            print(f"[ERROR] {e}")
+            sys.exit(1)
+    expire_label = f"，过期时间: {expire_at}" if expire_at else "（永久）"
+
     if args.server:
         # 添加到指定服务器的专属白名单
         srv = _find_server(config, args.server)
@@ -114,17 +210,17 @@ def cmd_ip_add(args):
         if any(e["ip"] == ip for e in wl):
             print(f"[WARN] {ip} 已在 {srv['name']} 的专属白名单中，跳过")
             return
-        wl.append(_make_ip_entry(ip, args.desc))
+        wl.append(_make_ip_entry(ip, args.desc, expire_at))
         save_config(config)
-        print(f"[OK] 已添加 {ip} 到 {srv['name']} 的专属白名单")
+        print(f"[OK] 已添加 {ip} 到 {srv['name']} 的专属白名单{expire_label}")
     else:
         # 添加到全局白名单
         if any(e["ip"] == ip for e in config["whitelist"]):
             print(f"[WARN] {ip} 已在全局白名单中，跳过")
             return
-        config["whitelist"].append(_make_ip_entry(ip, args.desc))
+        config["whitelist"].append(_make_ip_entry(ip, args.desc, expire_at))
         save_config(config)
-        print(f"[OK] 已添加 {ip} 到全局白名单")
+        print(f"[OK] 已添加 {ip} 到全局白名单{expire_label}")
 
 
 def cmd_ip_remove(args):
@@ -172,10 +268,17 @@ def cmd_ip_list(args):
         return
 
     print(f"\n── {label} ──")
-    print(f"\n{'IP/CIDR':<20} {'备注':<20} {'添加人':<15} {'添加时间'}")
-    print("-" * 75)
+    print(f"\n{'IP/CIDR':<20} {'备注':<20} {'添加人':<15} {'添加时间':<22} {'有效期'}")
+    print("-" * 95)
     for e in wl:
-        print(f"{e['ip']:<20} {e.get('description',''):<20} {e.get('added_by',''):<15} {e.get('added_at','')}")
+        if e.get("expire_at"):
+            expire_info = e["expire_at"]
+            if is_entry_expired(e):
+                expire_info += " [已过期]"
+        else:
+            expire_info = "永久"
+        print(f"{e['ip']:<20} {e.get('description',''):<20} {e.get('added_by',''):<15} "
+              f"{e.get('added_at',''):<22} {expire_info}")
     print(f"\n共 {len(wl)} 条记录")
 
 
@@ -1015,6 +1118,10 @@ def build_parser() -> argparse.ArgumentParser:
     ip_add = ip_sub.add_parser("add", help="添加 IP 到白名单")
     ip_add.add_argument("ip", help="IP 地址或 CIDR（如 192.168.1.1 或 10.0.0.0/24）")
     ip_add.add_argument("--desc", "-d", help="备注说明")
+    ip_add.add_argument("--expire", "-e",
+                        metavar="TIME",
+                        help="有效期：7d / 24h / 30m（相对）或 2025-12-31 / '2025-12-31 23:59:59'（绝对）。"
+                             "不填则永久有效。")
     ip_add.add_argument("--server", "-s", help="添加到指定服务器的专属白名单（不指定则为全局）")
     ip_add.set_defaults(func=cmd_ip_add)
 
