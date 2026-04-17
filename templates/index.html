@@ -38,6 +38,16 @@
           <i class="fas fa-sliders"></i>
           <span>设置</span>
         </button>
+        <button onclick="openChangePwdModal()"
+          class="flex items-center gap-1.5 text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors text-sm">
+          <i class="fas fa-key"></i>
+          <span>修改密码</span>
+        </button>
+        <button onclick="doLogout()"
+          class="flex items-center gap-1.5 text-slate-500 hover:text-red-600 px-3 py-1.5 rounded-md hover:bg-red-50 transition-colors text-sm">
+          <i class="fas fa-arrow-right-from-bracket"></i>
+          <span>退出</span>
+        </button>
       </div>
     </div>
   </header>
@@ -339,6 +349,42 @@
       <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-100">
         <button onclick="closeEditIPModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">取消</button>
         <button onclick="submitEditIP()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 修改密码模态框 ────────────────────────────────────────────── -->
+  <div id="change-pwd-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4">
+    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeChangePwdModal()"></div>
+    <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 fade-in">
+      <div class="flex items-center justify-between mb-5">
+        <h3 class="text-base font-semibold text-slate-800">修改密码</h3>
+        <button onclick="closeChangePwdModal()" class="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-md hover:bg-slate-100">
+          <i class="fas fa-xmark"></i>
+        </button>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1">旧密码</label>
+          <input id="cp-old" type="password" placeholder="当前密码"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1">新密码</label>
+          <input id="cp-new" type="password" placeholder="至少 6 位"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1">确认新密码</label>
+          <input id="cp-confirm" type="password" placeholder="再次输入新密码"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            onkeydown="if(event.key==='Enter')submitChangePwd()">
+        </div>
+      </div>
+      <div id="cp-err" class="hidden mt-3 text-xs text-red-500 bg-red-50 rounded-lg px-3 py-2"></div>
+      <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-100">
+        <button onclick="closeChangePwdModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">取消</button>
+        <button onclick="submitChangePwd()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">保存</button>
       </div>
     </div>
   </div>
@@ -1329,6 +1375,78 @@
     function escAttr(s) {
       return String(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
+
+    // ─── 认证 ──────────────────────────────────────────────────────
+
+    async function doLogout() {
+      if (!confirm('确认退出登录？')) return;
+      await fetch('/api/logout', { method: 'POST' });
+      window.location.href = '/login';
+    }
+
+    function openChangePwdModal() {
+      ['cp-old', 'cp-new', 'cp-confirm'].forEach(id => document.getElementById(id).value = '');
+      document.getElementById('cp-err').classList.add('hidden');
+      document.getElementById('change-pwd-modal').classList.remove('hidden');
+      setTimeout(() => document.getElementById('cp-old').focus(), 50);
+    }
+
+    function closeChangePwdModal() {
+      document.getElementById('change-pwd-modal').classList.add('hidden');
+    }
+
+    async function submitChangePwd() {
+      const old_password = document.getElementById('cp-old').value;
+      const new_password = document.getElementById('cp-new').value;
+      const confirm_password = document.getElementById('cp-confirm').value;
+      const errEl = document.getElementById('cp-err');
+
+      if (!old_password || !new_password) {
+        errEl.textContent = '请填写所有字段';
+        errEl.classList.remove('hidden');
+        return;
+      }
+      if (new_password !== confirm_password) {
+        errEl.textContent = '两次输入的新密码不一致';
+        errEl.classList.remove('hidden');
+        return;
+      }
+      if (new_password.length < 6) {
+        errEl.textContent = '新密码至少 6 位';
+        errEl.classList.remove('hidden');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/password', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ old_password, new_password }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          closeChangePwdModal();
+          toast('密码已更新', 'success');
+        } else {
+          errEl.textContent = data.message;
+          errEl.classList.remove('hidden');
+        }
+      } catch (e) {
+        errEl.textContent = '请求失败: ' + e.message;
+        errEl.classList.remove('hidden');
+      }
+    }
+
+    // 全局拦截 401，跳转至登录页
+    const _origFetch = window.fetch;
+    window.fetch = async function(...args) {
+      const res = await _origFetch(...args);
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return res;
+      }
+      return res;
+    };
 
     // ─── 初始化 ────────────────────────────────────────────────────
 

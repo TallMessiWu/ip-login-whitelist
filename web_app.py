@@ -12,15 +12,18 @@ import sys
 import io
 import json
 import time
+import hashlib
+import secrets
 import threading
 import datetime
 import getpass
 import argparse
 from contextlib import redirect_stdout
+from functools import wraps
 from pathlib import Path
 
 try:
-    from flask import Flask, jsonify, request, render_template
+    from flask import Flask, jsonify, request, render_template, session, redirect, url_for
 except ImportError:
     print("[ERROR] 请先安装 Flask:  pip install flask")
     sys.exit(1)
@@ -36,6 +39,132 @@ from whitelist_manager import (
 )
 
 app = Flask(__name__)
+
+
+# ─── 认证 ─────────────────────────────────────────────────────────────────────
+
+def _hash_password(password: str, salt: str = None) -> str:
+    if salt is None:
+        salt = secrets.token_hex(16)
+    h = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    return f"sha256:{salt}:{h}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        parts = stored.split(":", 2)
+        if len(parts) != 3 or parts[0] != "sha256":
+            return False
+        _, salt, _ = parts
+        return _hash_password(password, salt) == stored
+    except Exception:
+        return False
+
+
+def _get_auth_cfg() -> dict:
+    """返回 config.json 中的 auth 配置（不存在则返回默认值）。"""
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
+            return raw.get("settings", {}).get("auth", {})
+    except Exception:
+        pass
+    return {}
+
+
+def _setup_app_secret():
+    """从 config.json 加载或生成 Flask secret_key，并写回 config。"""
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
+            key = raw.get("settings", {}).get("secret_key")
+            if key:
+                app.secret_key = key
+                return
+        # 生成新密钥并写入 config
+        cfg = load_config()
+        new_key = secrets.token_hex(32)
+        cfg["settings"]["secret_key"] = new_key
+        # 若尚无 auth 配置，设置默认账户
+        auth = cfg["settings"].setdefault("auth", {})
+        if not auth.get("username"):
+            auth["username"] = "admin"
+        if not auth.get("password_hash"):
+            auth["password_hash"] = _hash_password("admin")
+            print("[INFO] 已初始化默认账户: admin / admin  请登录后及时修改密码")
+        save_config(cfg)
+        app.secret_key = new_key
+    except Exception:
+        app.secret_key = secrets.token_hex(32)
+
+
+@app.before_request
+def _require_login():
+    """拦截所有未登录请求，公开路径除外。"""
+    public = {"/login", "/api/login"}
+    if request.path in public or request.path.startswith("/static/"):
+        return None
+    if not session.get("authenticated"):
+        if request.path.startswith("/api/"):
+            return jsonify({"success": False, "message": "未登录"}), 401
+        return redirect(url_for("login_page"))
+    return None
+
+
+# ─── 认证路由 ──────────────────────────────────────────────────────────────────
+
+@app.route("/login")
+def login_page():
+    if session.get("authenticated"):
+        return redirect(url_for("index"))
+    return render_template("login.html")
+
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.json or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    auth = _get_auth_cfg()
+    expected_user = auth.get("username") or "admin"
+    password_hash = auth.get("password_hash") or ""
+
+    if username != expected_user or not _verify_password(password, password_hash):
+        return jsonify({"success": False, "message": "用户名或密码错误"}), 401
+
+    session["authenticated"] = True
+    session["username"] = username
+    return jsonify({"success": True, "message": "登录成功"})
+
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.clear()
+    return jsonify({"success": True})
+
+
+@app.route("/api/auth/password", methods=["PATCH"])
+def api_change_password():
+    data = request.json or {}
+    old_pw = data.get("old_password") or ""
+    new_pw = data.get("new_password") or ""
+
+    if not new_pw or len(new_pw) < 6:
+        return jsonify({"success": False, "message": "新密码至少 6 位"}), 400
+
+    cfg = load_config()
+    auth = cfg["settings"].setdefault("auth", {})
+    stored = auth.get("password_hash") or ""
+
+    if not _verify_password(old_pw, stored):
+        return jsonify({"success": False, "message": "旧密码错误"}), 403
+
+    auth["password_hash"] = _hash_password(new_pw)
+    save_config(cfg)
+    return jsonify({"success": True, "message": "密码已更新"})
 
 
 # ─── 自动下发调度器 ────────────────────────────────────────────────────────────
@@ -731,6 +860,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="开启 Flask 调试模式")
     args = parser.parse_args()
 
+    _setup_app_secret()
     _init_scheduler_from_config()
 
     url = f"http://{args.host}:{args.port}"

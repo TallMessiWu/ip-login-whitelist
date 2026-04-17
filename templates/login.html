@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 · SSH IP 白名单</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    .fade-in { animation: fadeIn .25s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body class="bg-slate-50 min-h-screen flex items-center justify-center p-4">
+
+  <div class="w-full max-w-sm fade-in">
+    <!-- Logo -->
+    <div class="flex flex-col items-center mb-8">
+      <div class="w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center shadow-lg mb-3">
+        <i class="fas fa-shield-halved text-white text-2xl"></i>
+      </div>
+      <h1 class="text-xl font-bold text-slate-800">SSH IP 白名单</h1>
+      <p class="text-sm text-slate-400 mt-1">请登录以继续</p>
+    </div>
+
+    <!-- 登录卡片 -->
+    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+      <div id="err-box" class="hidden mb-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-2.5">
+        <i class="fas fa-circle-xmark mr-1.5"></i><span id="err-msg"></span>
+      </div>
+
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">用户名</label>
+          <input id="username" type="text" placeholder="admin" autocomplete="username"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+            onkeydown="if(event.key==='Enter')document.getElementById('password').focus()">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">密码</label>
+          <div class="relative">
+            <input id="password" type="password" placeholder="••••••••" autocomplete="current-password"
+              class="w-full border border-slate-300 rounded-lg px-3 py-2.5 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+              onkeydown="if(event.key==='Enter')doLogin()">
+            <button type="button" onclick="togglePwd()" tabindex="-1"
+              class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+              <i id="pwd-eye" class="fas fa-eye text-sm"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <button id="login-btn" onclick="doLogin()"
+        class="mt-5 w-full bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
+        <i class="fas fa-arrow-right-to-bracket"></i>
+        登录
+      </button>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('username').focus();
+
+    function togglePwd() {
+      const input = document.getElementById('password');
+      const eye = document.getElementById('pwd-eye');
+      if (input.type === 'password') {
+        input.type = 'text';
+        eye.className = 'fas fa-eye-slash text-sm';
+      } else {
+        input.type = 'password';
+        eye.className = 'fas fa-eye text-sm';
+      }
+    }
+
+    async function doLogin() {
+      const btn = document.getElementById('login-btn');
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+
+      if (!username || !password) {
+        showErr('请输入用户名和密码');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> 登录中...';
+      hideErr();
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          window.location.href = '/';
+        } else {
+          showErr(data.message || '登录失败');
+        }
+      } catch (e) {
+        showErr('网络错误，请重试');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-arrow-right-to-bracket"></i> 登录';
+      }
+    }
+
+    function showErr(msg) {
+      document.getElementById('err-msg').textContent = msg;
+      document.getElementById('err-box').classList.remove('hidden');
+    }
+
+    function hideErr() {
+      document.getElementById('err-box').classList.add('hidden');
+    }
+  </script>
+</body>
+</html>
