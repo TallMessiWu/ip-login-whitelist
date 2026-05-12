@@ -103,7 +103,7 @@ def _setup_app_secret():
 @app.before_request
 def _require_login():
     """拦截所有未登录请求，公开路径除外。"""
-    public = {"/login", "/api/login"}
+    public = {"/login", "/api/login", "/guest", "/api/guest/replace"}
     if request.path in public or request.path.startswith("/static/"):
         return None
     if not session.get("authenticated"):
@@ -120,6 +120,11 @@ def login_page():
     if session.get("authenticated"):
         return redirect(url_for("index"))
     return render_template("login.html")
+
+
+@app.route("/guest")
+def guest_page():
+    return render_template("guest.html")
 
 
 @app.route("/api/login", methods=["POST"])
@@ -144,6 +149,106 @@ def api_login():
 def api_logout():
     session.clear()
     return jsonify({"success": True})
+
+
+@app.route("/api/guest/replace", methods=["POST"])
+def api_guest_replace():
+    """Guest 自助替换 IP：找到旧 IP 替换为新 IP，然后自动下发。"""
+    data = request.json or {}
+    old_ip = (data.get("old_ip") or "").strip()
+    new_ip = (data.get("new_ip") or "").strip()
+
+    if not old_ip or not new_ip:
+        return jsonify({"success": False, "message": "旧 IP 和新 IP 均不能为空"}), 400
+    if not validate_ip_or_cidr(old_ip):
+        return jsonify({"success": False, "message": f"无效的旧 IP 格式: {old_ip}"}), 400
+    if not validate_ip_or_cidr(new_ip):
+        return jsonify({"success": False, "message": f"无效的新 IP 格式: {new_ip}"}), 400
+    if old_ip == new_ip:
+        return jsonify({"success": False, "message": "新旧 IP 相同，无需替换"}), 400
+
+    cfg = load_config()
+
+    # 搜索并替换：全局白名单 + 各服务器专属白名单
+    found_global = False
+    found_servers = []  # [(server_dict, entry_index)]
+    replaced_count = 0
+
+    # ① 全局白名单
+    for entry in cfg["whitelist"]:
+        if entry["ip"] == old_ip:
+            entry["ip"] = new_ip
+            found_global = True
+            replaced_count += 1
+
+    # ② 各服务器专属白名单
+    for srv in cfg["servers"]:
+        for entry in srv.get("whitelist", []):
+            if entry["ip"] == old_ip:
+                entry["ip"] = new_ip
+                found_servers.append(srv)
+                replaced_count += 1
+
+    if replaced_count == 0:
+        return jsonify({"success": False, "message": f"未在白名单中找到 IP: {old_ip}"}), 404
+
+    save_config(cfg)
+
+    # 自动下发到所有服务器（或仅受影响服务器）
+    if not cfg["servers"]:
+        return jsonify({
+            "success": True,
+            "message": f"已将 {replaced_count} 处 {old_ip} 替换为 {new_ip}（无服务器，跳过下发）",
+        })
+
+    ssh_port = cfg["settings"].get("ssh_port", 22)
+    persist = cfg["settings"].get("persist_rules", True)
+    global_whitelist = cfg["whitelist"]
+
+    results = []
+    success_count = 0
+    for server in cfg["servers"]:
+        merged = get_merged_whitelist(server, global_whitelist)
+        if not merged:
+            results.append({
+                "server": server.get("name", server["host"]),
+                "host": server["host"],
+                "success": False,
+                "output": "[SKIP] 白名单已全空，跳过自动下发（防止锁死服务器）",
+            })
+            continue
+
+        buf = io.StringIO()
+        try:
+            script = generate_apply_script(merged, ssh_port, persist)
+            with redirect_stdout(buf):
+                ok = run_on_server(server, script, config=cfg, interactive=False)
+        except Exception as exc:
+            ok = False
+            buf.write(f"[ERROR] {exc}\n")
+
+        if ok:
+            success_count += 1
+        results.append({
+            "server": server.get("name", server["host"]),
+            "host": server["host"],
+            "success": ok,
+            "output": buf.getvalue(),
+        })
+
+    deploy_log = ""
+    for r in results:
+        deploy_log += f"{'=' * 56}\n"
+        deploy_log += f"  服务器: {r['server']} ({r['host']})  {'OK' if r['success'] else 'FAIL'}\n"
+        deploy_log += f"{'-' * 56}\n"
+        deploy_log += r["output"].rstrip() + "\n\n"
+    deploy_log += f"下发完成: {success_count}/{len(results)} 台成功"
+
+    return jsonify({
+        "success": True,
+        "message": f"已将 {replaced_count} 处 {old_ip} 替换为 {new_ip}，并完成下发",
+        "deploy_result": deploy_log,
+    })
 
 
 @app.route("/api/auth/password", methods=["PATCH"])

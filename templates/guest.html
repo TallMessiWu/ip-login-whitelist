@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Guest 自助换 IP · SSH IP 白名单</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    .fade-in { animation: fadeIn .25s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .log-output { font-family: 'Courier New', 'Consolas', monospace; }
+  </style>
+</head>
+<body class="bg-slate-50 min-h-screen flex items-center justify-center p-4">
+
+  <div class="w-full max-w-sm fade-in">
+    <!-- Logo -->
+    <div class="flex flex-col items-center mb-8">
+      <div class="w-14 h-14 bg-teal-600 rounded-2xl flex items-center justify-center shadow-lg mb-3">
+        <i class="fas fa-user text-white text-2xl"></i>
+      </div>
+      <h1 class="text-xl font-bold text-slate-800">Guest 自助换 IP</h1>
+      <p class="text-sm text-slate-400 mt-1">将自己旧的 IP 替换为新 IP</p>
+    </div>
+
+    <!-- 表单卡片 -->
+    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+      <div id="err-box" class="hidden mb-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-2.5">
+        <i class="fas fa-circle-xmark mr-1.5"></i><span id="err-msg"></span>
+      </div>
+      <div id="ok-box" class="hidden mb-4 text-sm text-green-600 bg-green-50 border border-green-200 rounded-lg px-4 py-2.5">
+        <i class="fas fa-circle-check mr-1.5"></i><span id="ok-msg"></span>
+      </div>
+
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">旧 IP / CIDR</label>
+          <input id="old-ip" type="text" placeholder="例如 192.168.1.100"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition"
+            onkeydown="if(event.key==='Enter')document.getElementById('new-ip').focus()">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">新 IP / CIDR</label>
+          <input id="new-ip" type="text" placeholder="例如 10.0.0.1"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition"
+            onkeydown="if(event.key==='Enter')doReplace()">
+        </div>
+      </div>
+
+      <button id="submit-btn" onclick="doReplace()"
+        class="mt-5 w-full bg-teal-600 hover:bg-teal-700 text-white py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
+        <i class="fas fa-rotate"></i>
+        替换并下发
+      </button>
+
+      <!-- 结果输出 -->
+      <div id="output-wrap" class="hidden mt-4">
+        <div class="log-output bg-slate-900 text-slate-100 rounded-lg px-4 py-3 text-xs leading-relaxed overflow-auto max-h-60">
+          <pre id="output-log" class="whitespace-pre-wrap"></pre>
+        </div>
+      </div>
+
+      <div class="mt-4 text-center">
+        <a href="/login" class="text-xs text-slate-400 hover:text-slate-600 transition-colors">
+          <i class="fas fa-arrow-left mr-1"></i>返回登录
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('old-ip').focus();
+
+    async function doReplace() {
+      const btn = document.getElementById('submit-btn');
+      const oldIp = document.getElementById('old-ip').value.trim();
+      const newIp = document.getElementById('new-ip').value.trim();
+
+      hideErr();
+      hideOk();
+      document.getElementById('output-wrap').classList.add('hidden');
+
+      if (!oldIp || !newIp) {
+        showErr('请填写旧 IP 和新 IP');
+        return;
+      }
+
+      if (oldIp === newIp) {
+        showErr('新旧 IP 相同，无需替换');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> 处理中...';
+
+      try {
+        const res = await fetch('/api/guest/replace', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ old_ip: oldIp, new_ip: newIp }),
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          showOk(data.message);
+          if (data.deploy_result) {
+            showOutput(data.deploy_result);
+          }
+        } else {
+          showErr(data.message || '替换失败');
+          if (data.deploy_result) {
+            showOutput(data.deploy_result);
+          }
+        }
+      } catch (e) {
+        showErr('网络错误，请重试');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-rotate"></i> 替换并下发';
+      }
+    }
+
+    function showOutput(text) {
+      document.getElementById('output-wrap').classList.remove('hidden');
+      document.getElementById('output-log').textContent = text;
+    }
+
+    function showErr(msg) {
+      document.getElementById('err-msg').textContent = msg;
+      document.getElementById('err-box').classList.remove('hidden');
+    }
+
+    function hideErr() {
+      document.getElementById('err-box').classList.add('hidden');
+    }
+
+    function showOk(msg) {
+      document.getElementById('ok-msg').textContent = msg;
+      document.getElementById('ok-box').classList.remove('hidden');
+    }
+
+    function hideOk() {
+      document.getElementById('ok-box').classList.add('hidden');
+    }
+  </script>
+</body>
+</html>
