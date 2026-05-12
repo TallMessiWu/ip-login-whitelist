@@ -1311,8 +1311,11 @@ if __name__ == "__main__":
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     # SESSION_COOKIE_SECURE 需要 HTTPS，默认不开启。部署在反向代理后可启用。
 
-    url = f"http://{args.host}:{args.port}"
-    print(f"[OK] 启动 Web 界面: {url}")
+    if args.host in ("0.0.0.0", "::"):
+        print(f"[OK] 本机访问: http://127.0.0.1:{args.port}")
+        print(f"[INFO] Flask 下面会列出所有可用网卡地址（局域网 / 虚拟网卡），任选其一可用")
+    else:
+        print(f"[OK] 启动 Web 界面: http://{args.host}:{args.port}")
     if args.debug:
         print("[WARN] debug 模式已开启，生产环境请关闭以禁用远程代码执行调试器")
     app.run(host=args.host, port=args.port, debug=args.debug)

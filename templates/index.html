@@ -555,6 +555,9 @@
       if (url === '/api/login' || url === '/api/logout') {
         _csrfToken = '';
       }
+      if (res.status === 401 && url !== '/api/login') {
+        window.location.href = '/login';
+      }
       return res;
     };
 
@@ -1852,17 +1855,6 @@
         errEl.classList.remove('hidden');
       }
     }
-
-    // 全局拦截 401，跳转至登录页
-    const _origFetch = window.fetch;
-    window.fetch = async function(...args) {
-      const res = await _origFetch(...args);
-      if (res.status === 401) {
-        window.location.href = '/login';
-        return res;
-      }
-      return res;
-    };
 
     // ─── 初始化 ────────────────────────────────────────────────────
 
