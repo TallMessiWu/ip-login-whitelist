@@ -101,16 +101,33 @@ def _setup_app_secret():
         app.secret_key = secrets.token_hex(32)
 
 
+def _ensure_csrf_token():
+    """确保 session 中存在 CSRF token。"""
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(32)
+
+
 @app.before_request
 def _require_login():
-    """拦截所有未登录请求，公开路径除外。"""
-    public = {"/login", "/api/login", "/guest", "/api/guest/replace", "/apply", "/api/apply", "/api/check-my-ip", "/api/servers-public"}
+    """拦截所有未登录请求，公开路径除外。同时校验 CSRF。"""
+    public = {"/login", "/api/login", "/guest", "/api/guest/replace", "/apply", "/api/apply",
+              "/api/check-my-ip", "/api/servers-public", "/api/csrf-token"}
     if request.path in public or request.path.startswith("/static/"):
+        _ensure_csrf_token()
         return None
     if not session.get("authenticated"):
         if request.path.startswith("/api/"):
             return jsonify({"success": False, "message": "未登录"}), 401
         return redirect(url_for("login_page"))
+
+    # CSRF 校验：所有状态变更请求必须携带有效 token
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        token = request.headers.get("X-CSRF-Token") or ""
+        if not token or token != session.get("csrf_token", ""):
+            if request.path.startswith("/api/"):
+                return jsonify({"success": False, "message": "CSRF token 无效"}), 403
+            return "CSRF token 无效", 403
+
     return None
 
 
@@ -158,9 +175,18 @@ def api_login():
     if username != expected_user or not _verify_password(password, password_hash):
         return jsonify({"success": False, "message": "用户名或密码错误"}), 401
 
+    # 重新生成 session 防止 session fixation 攻击
+    session.clear()
     session["authenticated"] = True
     session["username"] = username
+    _ensure_csrf_token()
     return jsonify({"success": True, "message": "登录成功"})
+
+
+@app.route("/api/csrf-token")
+def api_csrf_token():
+    _ensure_csrf_token()
+    return jsonify({"success": True, "token": session["csrf_token"]})
 
 
 @app.route("/api/logout", methods=["POST"])
@@ -171,7 +197,7 @@ def api_logout():
 
 @app.route("/api/guest/replace", methods=["POST"])
 def api_guest_replace():
-    """Guest 自助替换 IP：找到旧 IP 替换为新 IP，然后自动下发。"""
+    """Guest 自助替换 IP：提交替换申请，需管理员审核后执行。"""
     data = request.json or {}
     old_ip = (data.get("old_ip") or "").strip()
     new_ip = (data.get("new_ip") or "").strip()
@@ -187,85 +213,53 @@ def api_guest_replace():
 
     cfg = load_config()
 
-    # 搜索并替换：全局白名单 + 各服务器专属白名单
+    # 搜索旧 IP 所在位置，构建影响的服务器列表
+    affected_servers = []
     found_global = False
-    found_servers = []  # [(server_dict, entry_index)]
-    replaced_count = 0
 
-    # ① 全局白名单
-    for entry in cfg["whitelist"]:
+    for entry in cfg.get("whitelist", []):
         if entry["ip"] == old_ip:
-            entry["ip"] = new_ip
             found_global = True
-            replaced_count += 1
+            break
 
-    # ② 各服务器专属白名单
-    for srv in cfg["servers"]:
+    for srv in cfg.get("servers", []):
         for entry in srv.get("whitelist", []):
             if entry["ip"] == old_ip:
-                entry["ip"] = new_ip
-                found_servers.append(srv)
-                replaced_count += 1
+                affected_servers.append(srv["host"])
+                break
 
-    if replaced_count == 0:
+    if not found_global and not affected_servers:
         return jsonify({"success": False, "message": f"未在白名单中找到 IP: {old_ip}"}), 404
 
+    if found_global:
+        affected_servers = [s["host"] for s in cfg.get("servers", [])]
+
+    now = datetime.datetime.now()
+    app_id = now.strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(4)
+    application = {
+        "id": app_id,
+        "type": "replace",
+        "ip": new_ip,
+        "old_ip": old_ip,
+        "name": "Guest",
+        "employee_id": "",
+        "purpose": f"自助替换: {old_ip} → {new_ip}",
+        "duration": "",
+        "expire_at": None,
+        "servers": affected_servers,
+        "status": "pending",
+        "approved_servers": [],
+        "deployed": False,
+        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "reviewed_at": None,
+        "reviewed_by": None,
+    }
+    cfg.setdefault("applications", []).append(application)
     save_config(cfg)
-
-    # 自动下发到所有服务器（或仅受影响服务器）
-    if not cfg["servers"]:
-        return jsonify({
-            "success": True,
-            "message": f"已将 {replaced_count} 处 {old_ip} 替换为 {new_ip}（无服务器，跳过下发）",
-        })
-
-    ssh_port = cfg["settings"].get("ssh_port", 22)
-    persist = cfg["settings"].get("persist_rules", True)
-    global_whitelist = cfg["whitelist"]
-
-    results = []
-    success_count = 0
-    for server in cfg["servers"]:
-        merged = get_merged_whitelist(server, global_whitelist)
-        if not merged:
-            results.append({
-                "server": server.get("name", server["host"]),
-                "host": server["host"],
-                "success": False,
-                "output": "[SKIP] 白名单已全空，跳过自动下发（防止锁死服务器）",
-            })
-            continue
-
-        buf = io.StringIO()
-        try:
-            script = generate_apply_script(merged, ssh_port, persist)
-            with redirect_stdout(buf):
-                ok = run_on_server(server, script, config=cfg, interactive=False)
-        except Exception as exc:
-            ok = False
-            buf.write(f"[ERROR] {exc}\n")
-
-        if ok:
-            success_count += 1
-        results.append({
-            "server": server.get("name", server["host"]),
-            "host": server["host"],
-            "success": ok,
-            "output": buf.getvalue(),
-        })
-
-    deploy_log = ""
-    for r in results:
-        deploy_log += f"{'=' * 56}\n"
-        deploy_log += f"  服务器: {r['server']} ({r['host']})  {'OK' if r['success'] else 'FAIL'}\n"
-        deploy_log += f"{'-' * 56}\n"
-        deploy_log += r["output"].rstrip() + "\n\n"
-    deploy_log += f"下发完成: {success_count}/{len(results)} 台成功"
-
     return jsonify({
         "success": True,
-        "message": f"已将 {replaced_count} 处 {old_ip} 替换为 {new_ip}，并完成下发",
-        "deploy_result": deploy_log,
+        "message": "替换申请已提交，请等待管理员审核",
+        "id": app_id,
     })
 
 
@@ -382,16 +376,14 @@ def api_applications_review(app_id):
     if not final_servers:
         return jsonify({"success": False, "message": "所选服务器均不在原始申请中或服务器已不存在"}), 400
 
+    is_replace = app.get("type") == "replace"
+
     # 审核人可覆盖有效期
-    #   - 未传 expire_at → 使用申请人原始时长，从审批时间起算
-    #   - expire_at = "" 或 "permanent" → 改为永久
-    #   - 其他 → 使用审核人设定的时长
     raw_expire = data.get("expire_at")
     if raw_expire is None:
-        # 保持申请人原始时长，从审批时间开始计时
         duration = app.get("duration", "")
-        expire_at = app.get("expire_at")  # 绝对时间直接沿用
-        m = re.match(r'^(\d+)([dhm])$', duration.lower())
+        expire_at = app.get("expire_at")
+        m = re.match(r'^(\d+)([dhm])$', duration.lower()) if duration else None
         if m:
             n, unit = int(m.group(1)), m.group(2)
             delta = {'d': datetime.timedelta(days=n),
@@ -401,7 +393,7 @@ def api_applications_review(app_id):
     else:
         stripped = raw_expire.strip()
         if not stripped or stripped.lower() in ('never', '永久', 'permanent'):
-            expire_at = None  # 审核人改为永久
+            expire_at = None
         else:
             try:
                 expire_at = parse_expire(stripped)
@@ -411,13 +403,29 @@ def api_applications_review(app_id):
     # 构建备注：<姓名> <工号> <目的>
     description = f"{app.get('name', '')} {app.get('employee_id', '')} {app.get('purpose', '')}".strip()
 
-    # 添加 IP 到各服务器专属白名单
-    for srv in cfg["servers"]:
-        if srv["host"] in final_servers:
-            wl = srv.setdefault("whitelist", [])
-            if not any(e["ip"] == app["ip"] for e in wl):
-                entry = _make_ip_entry(app["ip"], description, expire_at)
-                wl.append(entry)
+    if is_replace:
+        # 替换模式：移除旧 IP，添加新 IP
+        old_ip = app.get("old_ip", "")
+        # ① 全局白名单中移除旧 IP
+        cfg["whitelist"] = [e for e in cfg.get("whitelist", []) if e["ip"] != old_ip]
+        # ② 各服务器专属白名单中移除旧 IP
+        for srv in cfg.get("servers", []):
+            srv["whitelist"] = [e for e in srv.get("whitelist", []) if e["ip"] != old_ip]
+        # ③ 添加新 IP 到批准的服务器专属白名单
+        for srv in cfg["servers"]:
+            if srv["host"] in final_servers:
+                wl = srv.setdefault("whitelist", [])
+                if not any(e["ip"] == app["ip"] for e in wl):
+                    entry = _make_ip_entry(app["ip"], description, expire_at, added_by=reviewer)
+                    wl.append(entry)
+    else:
+        # 普通模式：添加 IP 到各服务器专属白名单
+        for srv in cfg["servers"]:
+            if srv["host"] in final_servers:
+                wl = srv.setdefault("whitelist", [])
+                if not any(e["ip"] == app["ip"] for e in wl):
+                    entry = _make_ip_entry(app["ip"], description, expire_at, added_by=reviewer)
+                    wl.append(entry)
 
     app["status"] = "approved"
     app["approved_servers"] = final_servers
@@ -428,10 +436,8 @@ def api_applications_review(app_id):
     app["reviewed_by"] = reviewer
     save_config(cfg)
 
-    return jsonify({
-        "success": True,
-        "message": f"已批准 {app['ip']} 加入 {len(final_servers)} 台服务器白名单（待下发）",
-    })
+    msg = f"已批准 {app['ip']} 替换 {app.get('old_ip', '')} ({len(final_servers)} 台服务器)" if is_replace else f"已批准 {app['ip']} 加入 {len(final_servers)} 台服务器白名单（待下发）"
+    return jsonify({"success": True, "message": msg})
 
 
 @app.route("/api/applications/deploy", methods=["POST"])
@@ -794,7 +800,8 @@ def api_whitelist_add():
     if ip in [e["ip"] for e in cfg["whitelist"]]:
         return jsonify({"success": False, "message": f"{ip} 已在白名单中"}), 409
 
-    entry = _make_ip_entry(ip, description, expire_at)
+    added_by = session.get("username", "admin")
+    entry = _make_ip_entry(ip, description, expire_at, added_by=added_by)
     cfg["whitelist"].append(entry)
 
     # 全局已覆盖，清理各服务器专属白名单中的重复 IP
@@ -952,7 +959,8 @@ def api_server_whitelist_add(host):
     if any(e["ip"] == ip for e in wl):
         return jsonify({"success": False, "message": f"{ip} 已在该服务器白名单中"}), 409
 
-    entry = _make_ip_entry(ip, description, expire_at)
+    added_by = session.get("username", "admin")
+    entry = _make_ip_entry(ip, description, expire_at, added_by=added_by)
     wl.append(entry)
     save_config(cfg)
     return jsonify({"success": True, "message": f"已添加 {ip}", "entry": entry})

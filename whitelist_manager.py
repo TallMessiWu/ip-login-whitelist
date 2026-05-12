@@ -164,11 +164,11 @@ def _find_server(config: dict, host_or_name: str) -> dict | None:
     return None
 
 
-def _make_ip_entry(ip: str, desc: str, expire_at: str = None) -> dict:
+def _make_ip_entry(ip: str, desc: str, expire_at: str = None, added_by: str = None) -> dict:
     entry = {
         "ip": ip,
         "description": desc or "",
-        "added_by": getpass.getuser(),
+        "added_by": added_by or getpass.getuser(),
         "added_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     if expire_at:
@@ -592,9 +592,10 @@ echo "=== 移除 SSH IP 白名单 ==="
 if systemctl is-active --quiet firewalld 2>/dev/null; then
     echo "[模式] firewalld"
     # 移除所有白名单 rich-rule
-    for rule in $(firewall-cmd --list-rich-rules 2>/dev/null | grep "port=\\"{ssh_port}\\""); do
+    while IFS= read -r rule; do
+        [ -z "$rule" ] && continue
         firewall-cmd --permanent --remove-rich-rule="$rule" && echo "[OK] 已移除: $rule"
-    done
+    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep "port=\\"{ssh_port}\\"")
     # 恢复默认 ssh service 开放
     firewall-cmd --permanent --add-service=ssh
     firewall-cmd --reload
