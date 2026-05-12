@@ -8,15 +8,24 @@
 
 ## 安装
 
+推荐使用 [uv](https://github.com/astral-sh/uv) 管理依赖：
+
 ```bash
 git clone https://github.com/TallMessiWu/ip-login-whitelist.git
 cd ip-login-whitelist
-pip install -r requirements.txt   # flask>=3.0.0
+uv sync                            # 按 pyproject.toml / uv.lock 安装依赖
+uv run python web_app.py           # 在受管环境中启动 Web
+```
+
+或使用传统 pip：
+
+```bash
+pip install -r requirements.txt    # flask>=3.0.0
 ```
 
 `paramiko` 可选，无此包时自动降级为系统 `ssh` 命令；`flask` 仅 Web 界面需要。
 
-**系统要求**：Python 3.7+，远端服务器需有 `iptables` 或 `firewalld`（需 root 权限执行）。
+**系统要求**：Python 3.11+（`pyproject.toml` 声明），远端服务器需有 `iptables` 或 `firewalld`（需 root 权限执行）。
 
 ---
 
@@ -25,16 +34,18 @@ pip install -r requirements.txt   # flask>=3.0.0
 除 CLI 外，还提供浏览器管理界面：
 
 ```bash
-python web_app.py                     # 默认 http://0.0.0.0:6969
+python web_app.py                     # 默认监听 0.0.0.0:6969，本机用 http://127.0.0.1:6969
 python web_app.py --port 9090         # 自定义端口
-python web_app.py --host 127.0.0.1    # 仅本地访问
+python web_app.py --host 127.0.0.1    # 仅本地访问（输出只剩一行 URL）
 ```
 
-首次启动自动创建默认管理员账户 `admin / admin`，登录后请及时修改密码。
+> 启动时若看到多行 `Running on http://...` 是 Flask 列出所有可用网卡（包括 Clash/V2Ray 等创建的 `198.18.x.x` 虚拟网卡），任选一个可用。要只看一行就 `--host 127.0.0.1`。
+
+首次启动自动创建默认管理员账户 `admin / admin`，登录后请及时修改密码（首次登录强制要求改密）。
 
 打开浏览器访问即可使用以下功能：
 
-- **Web 登录认证**：密码哈希（SHA-256 + salt）存储，session 鉴权，支持在线修改密码
+- **Web 登录认证**：密码哈希 PBKDF2-HMAC-SHA256（200k 迭代，兼容旧 SHA-256），session 鉴权，登录速率限制，CSRF 防护，支持在线修改密码
 - **IP 白名单**：在线添加 / 删除 / 编辑白名单 IP，支持有效期设置，实时生效到 `config.json`
 - **服务器列表**：查看 / 添加 / 删除托管服务器，支持在线配置密钥、密码、代理
 - **服务器专属白名单**：每台服务器可额外维护专属 IP 白名单，与全局白名单自动合并去重
@@ -308,12 +319,28 @@ Web 后台可选启用的定时任务：
 ## 文件说明
 
 ```
-whitelist_manager.py     # CLI 全部功能 + Web 依赖的核心函数库，单文件 ~1220 行
-web_app.py               # Web 管理界面后端（Flask），REST API + 认证 + 后台调度器
-templates/index.html     # Web 管理主界面（白名单/服务器/下发/设置/审核/调度器）
-templates/login.html     # Web 登录页面
-templates/guest.html     # Guest 自助换 IP 页面（无需登录）
-templates/apply.html     # 自助申请白名单页面（无需登录）
-requirements.txt         # 依赖：flask>=3.0.0
-config.json              # 运行时自动生成，存储白名单、服务器、认证等（不提交）
+whitelist_manager.py        # CLI 全部功能 + Web 依赖的核心函数库，单文件 ~1300 行
+web_app.py                  # Web 管理界面后端（Flask），REST API + 认证 + 后台调度器
+templates/index.html        # Web 管理主界面（白名单/服务器/下发/设置/审核/调度器）
+templates/login.html        # Web 登录页面
+templates/guest.html        # Guest 自助换 IP 页面（无需登录）
+templates/apply.html        # 自助申请白名单页面（无需登录）
+tests/test_whitelist.py     # pytest 测试套件，覆盖 CLI + Web 双侧，~1600 行 / 60+ 测试类
+pyproject.toml / uv.lock    # uv 项目配置（Python ≥3.11，flask ≥3.1.3）
+requirements.txt            # pip 兼容依赖清单：flask>=3.0.0
+config.json                 # 运行时自动生成，存储白名单、服务器、认证等（不提交）
 ```
+
+---
+
+## 运行测试
+
+测试用 pytest + `unittest.mock`，不发起真实 SSH / 网络调用，配置文件落到 `tmp_path`：
+
+```bash
+uv run pytest                                          # 运行全部测试
+uv run pytest -v                                       # 详细模式
+uv run pytest tests/test_whitelist.py::TestParseExpire # 只跑某个测试类
+```
+
+覆盖范围：配置读写、IP 校验、CIDR 包含、时效解析、过期清理、白名单合并、脚本生成（apply / status / remove / audit-log）、SSH 执行（mock paramiko + subprocess）、代理解析、CLI 子命令、Web REST API、登录 / CSRF / 速率限制、调度器、申请审批流程。
