@@ -11,6 +11,7 @@ IP 白名单管理 Web 界面
 import sys
 import io
 import json
+import re
 import time
 import hashlib
 import secrets
@@ -103,7 +104,7 @@ def _setup_app_secret():
 @app.before_request
 def _require_login():
     """拦截所有未登录请求，公开路径除外。"""
-    public = {"/login", "/api/login", "/guest", "/api/guest/replace"}
+    public = {"/login", "/api/login", "/guest", "/api/guest/replace", "/apply", "/api/apply", "/api/check-my-ip", "/api/servers-public"}
     if request.path in public or request.path.startswith("/static/"):
         return None
     if not session.get("authenticated"):
@@ -125,6 +126,23 @@ def login_page():
 @app.route("/guest")
 def guest_page():
     return render_template("guest.html")
+
+
+@app.route("/apply")
+def apply_page():
+    return render_template("apply.html")
+
+
+@app.route("/api/servers-public")
+def api_servers_public():
+    """公开的服务器列表（不含认证信息），供申请页面使用。"""
+    cfg = load_config()
+    servers = [{
+        "host": s["host"],
+        "name": s.get("name", s["host"]),
+        "port": s.get("port", 22),
+    } for s in cfg.get("servers", [])]
+    return jsonify({"success": True, "servers": servers})
 
 
 @app.route("/api/login", methods=["POST"])
@@ -248,6 +266,250 @@ def api_guest_replace():
         "success": True,
         "message": f"已将 {replaced_count} 处 {old_ip} 替换为 {new_ip}，并完成下发",
         "deploy_result": deploy_log,
+    })
+
+
+# ─── 自助申请白名单 ──────────────────────────────────────────────────────────
+
+@app.route("/api/apply", methods=["POST"])
+def api_apply():
+    """用户自助申请加入白名单（无需登录）。"""
+    data = request.json or {}
+    ip = (data.get("ip") or "").strip()
+    name = (data.get("name") or "").strip()
+    employee_id = (data.get("employee_id") or "").strip()
+    purpose = (data.get("purpose") or "").strip()
+    duration = (data.get("duration") or "").strip()
+    servers = data.get("servers") or []
+
+    if not ip:
+        return jsonify({"success": False, "message": "IP 不能为空"}), 400
+    if not validate_ip_or_cidr(ip):
+        return jsonify({"success": False, "message": f"无效的 IP 格式: {ip}"}), 400
+    if not name:
+        return jsonify({"success": False, "message": "姓名不能为空"}), 400
+    if not employee_id:
+        return jsonify({"success": False, "message": "工号不能为空"}), 400
+    if not purpose:
+        return jsonify({"success": False, "message": "使用目的不能为空"}), 400
+    if not duration:
+        return jsonify({"success": False, "message": "请选择使用时长"}), 400
+    if not servers or not isinstance(servers, list):
+        return jsonify({"success": False, "message": "请至少选择一台服务器"}), 400
+
+    cfg = load_config()
+    all_hosts = {s["host"] for s in cfg.get("servers", [])}
+    for h in servers:
+        if h not in all_hosts:
+            return jsonify({"success": False, "message": f"服务器不存在: {h}"}), 400
+
+    now = datetime.datetime.now()
+    created_at = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    # 解析时长：相对时长（1d/7d 等）不预计算，等审批时从审批时间起算
+    # 绝对时间（datetime-local / 自定义日期）直接存入，审批时不重新计算
+    expire_at = None
+    if not re.match(r'^(\d+)([dhm])$', duration.lower()):
+        try:
+            expire_at = parse_expire(duration)
+        except ValueError:
+            return jsonify({"success": False, "message": f"无效的时长格式: {duration}"}), 400
+
+    app_id = now.strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(4)
+    application = {
+        "id": app_id,
+        "ip": ip,
+        "name": name,
+        "employee_id": employee_id,
+        "purpose": purpose,
+        "duration": duration,
+        "expire_at": expire_at,
+        "servers": servers,
+        "status": "pending",
+        "approved_servers": [],
+        "deployed": False,
+        "created_at": created_at,
+        "reviewed_at": None,
+        "reviewed_by": None,
+    }
+    cfg.setdefault("applications", []).append(application)
+    save_config(cfg)
+    return jsonify({"success": True, "message": "申请已提交，请等待管理员审核", "id": app_id})
+
+
+@app.route("/api/applications", methods=["GET"])
+def api_applications_list():
+    """获取所有申请列表（管理员）。"""
+    cfg = load_config()
+    apps = cfg.get("applications", [])
+    return jsonify({"success": True, "applications": apps})
+
+
+@app.route("/api/applications/<app_id>/review", methods=["POST"])
+def api_applications_review(app_id):
+    """审核申请：批准（可部分）或拒绝。批准仅写入白名单，不下发。"""
+    data = request.json or {}
+    action = (data.get("action") or "").strip()
+    approved_servers = data.get("servers") or []
+
+    if action not in ("approve", "reject"):
+        return jsonify({"success": False, "message": "操作必须为 approve 或 reject"}), 400
+
+    cfg = load_config()
+    apps = cfg.get("applications", [])
+    app = next((a for a in apps if a["id"] == app_id), None)
+    if not app:
+        return jsonify({"success": False, "message": "申请不存在"}), 404
+    if app["status"] != "pending":
+        return jsonify({"success": False, "message": f"申请状态为 {app['status']}，无法重复审核"}), 409
+
+    reviewer = session.get("username", "admin")
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if action == "reject":
+        app["status"] = "rejected"
+        app["reviewed_at"] = now_str
+        app["reviewed_by"] = reviewer
+        save_config(cfg)
+        return jsonify({"success": True, "message": "申请已拒绝"})
+
+    # approve（可部分）
+    if not approved_servers:
+        return jsonify({"success": False, "message": "请至少选择一台服务器批准"}), 400
+
+    valid_hosts = {s["host"] for s in cfg.get("servers", [])}
+    final_servers = [h for h in approved_servers if h in app["servers"] and h in valid_hosts]
+    if not final_servers:
+        return jsonify({"success": False, "message": "所选服务器均不在原始申请中或服务器已不存在"}), 400
+
+    # 审核人可覆盖有效期
+    #   - 未传 expire_at → 使用申请人原始时长，从审批时间起算
+    #   - expire_at = "" 或 "permanent" → 改为永久
+    #   - 其他 → 使用审核人设定的时长
+    raw_expire = data.get("expire_at")
+    if raw_expire is None:
+        # 保持申请人原始时长，从审批时间开始计时
+        duration = app.get("duration", "")
+        expire_at = app.get("expire_at")  # 绝对时间直接沿用
+        m = re.match(r'^(\d+)([dhm])$', duration.lower())
+        if m:
+            n, unit = int(m.group(1)), m.group(2)
+            delta = {'d': datetime.timedelta(days=n),
+                     'h': datetime.timedelta(hours=n),
+                     'm': datetime.timedelta(minutes=n)}[unit]
+            expire_at = (datetime.datetime.now() + delta).strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        stripped = raw_expire.strip()
+        if not stripped or stripped.lower() in ('never', '永久', 'permanent'):
+            expire_at = None  # 审核人改为永久
+        else:
+            try:
+                expire_at = parse_expire(stripped)
+            except ValueError:
+                return jsonify({"success": False, "message": f"无效的有效期格式: {stripped}"}), 400
+
+    # 构建备注：<姓名> <工号> <目的>
+    description = f"{app.get('name', '')} {app.get('employee_id', '')} {app.get('purpose', '')}".strip()
+
+    # 添加 IP 到各服务器专属白名单
+    for srv in cfg["servers"]:
+        if srv["host"] in final_servers:
+            wl = srv.setdefault("whitelist", [])
+            if not any(e["ip"] == app["ip"] for e in wl):
+                entry = _make_ip_entry(app["ip"], description, expire_at)
+                wl.append(entry)
+
+    app["status"] = "approved"
+    app["approved_servers"] = final_servers
+    app["deployed"] = False
+    if expire_at:
+        app["expire_at"] = expire_at
+    app["reviewed_at"] = now_str
+    app["reviewed_by"] = reviewer
+    save_config(cfg)
+
+    return jsonify({
+        "success": True,
+        "message": f"已批准 {app['ip']} 加入 {len(final_servers)} 台服务器白名单（待下发）",
+    })
+
+
+@app.route("/api/applications/deploy", methods=["POST"])
+def api_applications_deploy():
+    """下发所有已批准但未部署的申请涉及的服务器。"""
+    cfg = load_config()
+    apps = cfg.get("applications", [])
+    pending_deploy = [a for a in apps if a.get("status") == "approved" and not a.get("deployed")]
+
+    if not pending_deploy:
+        return jsonify({"success": False, "message": "没有待下发的申请"}), 400
+
+    # 收集所有需要下发的服务器 host
+    affected_hosts = set()
+    for a in pending_deploy:
+        for h in a.get("approved_servers", []):
+            affected_hosts.add(h)
+
+    servers_to_deploy = [s for s in cfg.get("servers", []) if s["host"] in affected_hosts]
+    if not servers_to_deploy:
+        return jsonify({"success": False, "message": "没有找到需要下发的服务器"}), 400
+
+    ssh_port = cfg["settings"].get("ssh_port", 22)
+    persist = cfg["settings"].get("persist_rules", True)
+    global_whitelist = cfg["whitelist"]
+
+    results = []
+    success_count = 0
+    for server in servers_to_deploy:
+        merged = get_merged_whitelist(server, global_whitelist)
+        if not merged:
+            results.append({
+                "server": server.get("name", server["host"]),
+                "host": server["host"],
+                "success": False,
+                "output": "[SKIP] 白名单已全空，跳过自动下发",
+            })
+            continue
+
+        buf = io.StringIO()
+        try:
+            script = generate_apply_script(merged, ssh_port, persist)
+            with redirect_stdout(buf):
+                ok = run_on_server(server, script, config=cfg, interactive=False)
+        except Exception as exc:
+            ok = False
+            buf.write(f"[ERROR] {exc}\n")
+
+        if ok:
+            success_count += 1
+        results.append({
+            "server": server.get("name", server["host"]),
+            "host": server["host"],
+            "success": ok,
+            "output": buf.getvalue(),
+        })
+
+    # 部署成功后标记所有相关申请为已部署
+    if success_count > 0:
+        for a in pending_deploy:
+            a["deployed"] = True
+        save_config(cfg)
+
+    deploy_log = ""
+    for r in results:
+        deploy_log += f"{'=' * 56}\n"
+        deploy_log += f"  服务器: {r['server']} ({r['host']})  {'OK' if r['success'] else 'FAIL'}\n"
+        deploy_log += f"{'-' * 56}\n"
+        deploy_log += r["output"].rstrip() + "\n\n"
+    deploy_log += f"下发完成: {success_count}/{len(results)} 台成功"
+
+    return jsonify({
+        "success": success_count > 0,
+        "success_count": success_count,
+        "total": len(results),
+        "message": f"下发完成: {success_count}/{len(results)} 台成功",
+        "deploy_result": deploy_log,
+        "results": results,
     })
 
 

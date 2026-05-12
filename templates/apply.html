@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>申请加入白名单 · SSH IP 白名单</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    .fade-in { animation: fadeIn .25s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="bg-slate-50 min-h-screen flex items-center justify-center p-4">
+
+  <div class="w-full max-w-sm fade-in">
+    <!-- Logo -->
+    <div class="flex flex-col items-center mb-8">
+      <div class="w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center shadow-lg mb-3">
+        <i class="fas fa-file-signature text-white text-2xl"></i>
+      </div>
+      <h1 class="text-xl font-bold text-slate-800">申请加入白名单</h1>
+      <p class="text-sm text-slate-400 mt-1">提交后需等待管理员审核</p>
+    </div>
+
+    <!-- 表单卡片 -->
+    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+      <div id="err-box" class="hidden mb-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-2.5">
+        <i class="fas fa-circle-xmark mr-1.5"></i><span id="err-msg"></span>
+      </div>
+      <div id="ok-box" class="hidden mb-4 text-sm text-green-600 bg-green-50 border border-green-200 rounded-lg px-4 py-2.5">
+        <i class="fas fa-circle-check mr-1.5"></i><span id="ok-msg"></span>
+      </div>
+
+      <div class="space-y-4">
+        <!-- IP 输入 -->
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">
+            你的 IP / CIDR <span class="text-red-400">*</span>
+            <button onclick="autoDetectIP()" class="ml-1 text-blue-500 hover:text-blue-700 text-xs font-normal">
+              <i class="fas fa-magnifying-glass mr-0.5"></i>自动检测
+            </button>
+          </label>
+          <input id="ip" type="text" placeholder="例如 192.168.1.100 或 10.0.0.0/24"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition font-mono">
+        </div>
+
+        <!-- 姓名 + 工号 -->
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1.5">姓名 <span class="text-red-400">*</span></label>
+            <input id="name" type="text" placeholder="你的姓名"
+              class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1.5">工号 <span class="text-red-400">*</span></label>
+            <input id="employee-id" type="text" placeholder="你的工号"
+              class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition">
+          </div>
+        </div>
+
+        <!-- 使用目的 -->
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">使用目的 <span class="text-red-400">*</span></label>
+          <input id="purpose" type="text" placeholder="例如：远程办公、紧急维护..."
+            class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition">
+        </div>
+
+        <!-- 使用时长 -->
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">使用时长 <span class="text-red-400">*</span></label>
+          <div class="flex gap-2">
+            <select id="duration-preset" onchange="onDurationPresetChange()"
+              class="flex-1 border border-slate-300 rounded-lg px-2 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+              <option value="">请选择时长</option>
+              <option value="1d">1 天</option>
+              <option value="3d">3 天</option>
+              <option value="7d">7 天</option>
+              <option value="30d">30 天</option>
+              <option value="90d">90 天</option>
+              <option value="custom">自定义...</option>
+            </select>
+            <input id="duration-custom" type="datetime-local"
+              class="hidden flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <p class="mt-1 text-xs text-slate-400">
+            <i class="fas fa-circle-info mr-0.5"></i>时长从申请提交时间开始计算，不可申请永久
+          </p>
+        </div>
+
+        <!-- 服务器多选 -->
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">选择要加入的服务器（可多选） <span class="text-red-400">*</span></label>
+          <div id="server-list" class="max-h-48 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
+            <div class="px-3 py-4 text-center text-slate-400 text-sm">
+              <i class="fas fa-circle-notch spin mr-1"></i> 加载服务器列表...
+            </div>
+          </div>
+          <p class="mt-1 text-xs text-slate-400">
+            <i class="fas fa-circle-info mr-0.5"></i>只能申请加入服务器专属白名单，不可申请全局白名单
+          </p>
+        </div>
+      </div>
+
+      <button id="submit-btn" onclick="doApply()"
+        class="mt-5 w-full bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
+        <i class="fas fa-paper-plane"></i>
+        提交申请
+      </button>
+
+      <div class="mt-4 text-center">
+        <a href="/login" class="text-xs text-slate-400 hover:text-slate-600 transition-colors">
+          <i class="fas fa-arrow-left mr-1"></i>返回登录
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let servers = [];
+
+    function onDurationPresetChange() {
+      const preset = document.getElementById('duration-preset');
+      const custom = document.getElementById('duration-custom');
+      if (preset.value === 'custom') {
+        custom.classList.remove('hidden');
+        custom.focus();
+      } else {
+        custom.classList.add('hidden');
+      }
+    }
+
+    function getDurationValue() {
+      const preset = document.getElementById('duration-preset');
+      const custom = document.getElementById('duration-custom');
+      if (preset.value === 'custom') {
+        return custom.value || '';
+      }
+      return preset.value;
+    }
+
+    async function loadServers() {
+      try {
+        const res = await fetch('/api/servers-public');
+        const data = await res.json();
+        servers = data.servers || [];
+        renderServerList();
+      } catch (e) {
+        document.getElementById('server-list').innerHTML =
+          '<div class="px-3 py-4 text-center text-red-400 text-sm">加载失败，请检查网络</div>';
+      }
+    }
+
+    function renderServerList() {
+      const el = document.getElementById('server-list');
+      if (!servers.length) {
+        el.innerHTML = '<div class="px-3 py-4 text-center text-slate-400 text-sm">暂无服务器</div>';
+        return;
+      }
+      el.innerHTML = servers.map(s => `
+        <label class="flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 cursor-pointer transition-colors">
+          <input type="checkbox" value="${escAttr(s.host)}" class="srv-cb w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500">
+          <div class="flex-1 min-w-0">
+            <div class="text-sm text-slate-700 truncate">${escHtml(s.name || s.host)}</div>
+            <div class="text-xs text-slate-400">${escHtml(s.host)}:${s.port || 22}</div>
+          </div>
+        </label>
+      `).join('');
+    }
+
+    async function autoDetectIP() {
+      const btn = document.querySelector('[onclick="autoDetectIP()"]');
+      const orig = btn.innerHTML;
+      btn.innerHTML = '<i class="fas fa-circle-notch spin mr-0.5"></i>检测中...';
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/check-my-ip');
+        const data = await res.json();
+        if (data.client_ip && data.client_ip !== '127.0.0.1' && data.client_ip !== '::1') {
+          document.getElementById('ip').value = data.client_ip;
+        } else {
+          showErr('无法检测出口 IP，请手动输入');
+        }
+      } catch (e) {
+        showErr('检测失败，请手动输入');
+      } finally {
+        btn.innerHTML = orig;
+        btn.disabled = false;
+      }
+    }
+
+    async function doApply() {
+      const ip = document.getElementById('ip').value.trim();
+      const name = document.getElementById('name').value.trim();
+      const employeeId = document.getElementById('employee-id').value.trim();
+      const purpose = document.getElementById('purpose').value.trim();
+      const duration = getDurationValue();
+      const checked = document.querySelectorAll('.srv-cb:checked');
+      const selected = Array.from(checked).map(cb => cb.value);
+
+      hideErr();
+      hideOk();
+
+      if (!ip) { showErr('请填写你的 IP'); return; }
+      if (!name) { showErr('请填写姓名'); return; }
+      if (!employeeId) { showErr('请填写工号'); return; }
+      if (!purpose) { showErr('请填写使用目的'); return; }
+      if (!duration) { showErr('请选择使用时长'); return; }
+      if (!selected.length) { showErr('请至少选择一台服务器'); return; }
+
+      const btn = document.getElementById('submit-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> 提交中...';
+
+      try {
+        const res = await fetch('/api/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ip, name, employee_id: employeeId, purpose, duration, servers: selected }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          showOk(data.message);
+          // 清空表单
+          document.getElementById('ip').value = '';
+          document.getElementById('name').value = '';
+          document.getElementById('employee-id').value = '';
+          document.getElementById('purpose').value = '';
+          document.getElementById('duration-preset').value = '';
+          document.getElementById('duration-custom').classList.add('hidden');
+          document.getElementById('duration-custom').value = '';
+          document.querySelectorAll('.srv-cb:checked').forEach(cb => cb.checked = false);
+        } else {
+          showErr(data.message || '提交失败');
+        }
+      } catch (e) {
+        showErr('网络错误，请重试');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-paper-plane"></i> 提交申请';
+      }
+    }
+
+    function showErr(msg) {
+      document.getElementById('err-msg').textContent = msg;
+      document.getElementById('err-box').classList.remove('hidden');
+    }
+
+    function hideErr() {
+      document.getElementById('err-box').classList.add('hidden');
+    }
+
+    function showOk(msg) {
+      document.getElementById('ok-msg').textContent = msg;
+      document.getElementById('ok-box').classList.remove('hidden');
+    }
+
+    function hideOk() {
+      document.getElementById('ok-box').classList.add('hidden');
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function escAttr(s) {
+      return String(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    // 初始化
+    document.getElementById('ip').focus();
+    loadServers();
+  </script>
+</body>
+</html>

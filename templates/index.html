@@ -12,6 +12,9 @@
     @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
     .spin { animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .tab-btn { padding: 0.625rem 1.25rem; font-size: 0.875rem; font-weight: 500; color: #64748b; border-bottom: 2px solid transparent; transition: all .15s; cursor: pointer; background: none; display: inline-flex; align-items: center; gap: 0.375rem; }
+    .tab-btn:hover { color: #334155; }
+    .tab-btn.active { color: #2563eb; border-bottom-color: #2563eb; }
   </style>
 </head>
 <body class="bg-slate-50 min-h-screen text-sm">
@@ -57,6 +60,20 @@
 
   <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
 
+    <!-- Tab 导航 -->
+    <div class="flex gap-1 border-b border-slate-200 -mb-3">
+      <button onclick="switchTab('manage')" id="tab-btn-manage" class="tab-btn active">
+        <i class="fas fa-sliders"></i> 白名单管理
+      </button>
+      <button onclick="switchTab('review')" id="tab-btn-review" class="tab-btn">
+        <i class="fas fa-clipboard-check"></i> 审核
+        <span id="review-badge" class="hidden px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">0</span>
+      </button>
+    </div>
+
+    <!-- Tab: 白名单管理 -->
+    <div id="tab-manage" class="space-y-6">
+
     <!-- 上方两栏 -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
@@ -88,7 +105,9 @@
               class="border border-slate-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
               <option value="">永久</option>
               <option value="1d">1天</option>
-              <option value="7d">7天</option>
+              <option value="3d">3天</option>
+              <option value="7d">1周</option>
+              <option value="14d">2周</option>
               <option value="30d">30天</option>
               <option value="90d">90天</option>
               <option value="custom">自定义...</option>
@@ -215,6 +234,47 @@
       </div>
     </div>
 
+    </div><!-- /tab-manage -->
+
+    <!-- Tab: 审核 -->
+    <div id="tab-review" class="hidden space-y-6">
+      <!-- 筛选按钮组 -->
+      <div class="flex items-center gap-2">
+        <button onclick="filterApps('pending')" id="app-filter-pending"
+          class="px-3 py-1.5 rounded-md text-xs font-medium bg-blue-100 text-blue-700 border border-blue-200 transition-colors">
+          待审核 <span id="pending-count" class="ml-1 opacity-70">0</span>
+        </button>
+        <button onclick="filterApps('approved')" id="app-filter-approved"
+          class="px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors">
+          已批准
+        </button>
+        <button onclick="filterApps('rejected')" id="app-filter-rejected"
+          class="px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors">
+          已拒绝
+        </button>
+        <div class="flex-1"></div>
+        <button onclick="deployApproved()" id="review-deploy-btn"
+          class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+          <i class="fas fa-paper-plane"></i> 下发待部署
+        </button>
+      </div>
+
+      <!-- 下发输出区 -->
+      <div id="review-output-wrap" class="hidden">
+        <div class="log-output bg-slate-900 text-slate-100 rounded-lg px-4 py-3 text-xs leading-relaxed overflow-auto max-h-60">
+          <pre id="review-output-log" class="whitespace-pre-wrap"></pre>
+        </div>
+      </div>
+
+      <!-- 申请列表 -->
+      <div id="app-list" class="space-y-4">
+        <div class="bg-white rounded-xl border border-slate-200 shadow-sm px-5 py-12 text-center text-slate-400">
+          <i class="fas fa-inbox text-3xl block mb-2 opacity-30"></i>
+          暂无申请
+        </div>
+      </div>
+    </div><!-- /tab-review -->
+
   </main>
 
   <!-- ── 添加服务器模态框 ──────────────────────────────────────── -->
@@ -334,7 +394,9 @@
               class="flex-1 border border-slate-300 rounded-lg px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
               <option value="">永久</option>
               <option value="1d">1天</option>
-              <option value="7d">7天</option>
+              <option value="3d">3天</option>
+              <option value="7d">1周</option>
+              <option value="14d">2周</option>
               <option value="30d">30天</option>
               <option value="90d">90天</option>
               <option value="custom">自定义...</option>
@@ -485,6 +547,15 @@
         renderServers();
         syncDeploySelect();
         updateHeaderSummary();
+        // 静默更新审核徽章
+        try {
+          const res = await fetch('/api/applications');
+          const data = await res.json();
+          if (data.success) {
+            applications = data.applications || [];
+            updateReviewBadge();
+          }
+        } catch (e) { /* 静默失败 */ }
       } catch (e) {
         toast('加载失败: ' + e.message, 'error');
       } finally {
@@ -640,7 +711,9 @@
                   class="border border-indigo-200 rounded-md px-1.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white">
                   <option value="">永久</option>
                   <option value="1d">1天</option>
-                  <option value="7d">7天</option>
+                  <option value="3d">3天</option>
+                  <option value="7d">1周</option>
+                  <option value="14d">2周</option>
                   <option value="30d">30天</option>
                   <option value="90d">90天</option>
                   <option value="custom">自定义...</option>
@@ -1365,6 +1438,320 @@
 
       return `<span class="text-xs font-medium ${color} border px-1.5 py-0.5 rounded-full" title="${escHtml(expire_at)}">
         <i class="fas fa-hourglass-half mr-0.5"></i>${label}</span>`;
+    }
+
+    // ─── Tab 切换 ──────────────────────────────────────────────────
+
+    let currentTab = 'manage';
+    let appFilter = 'pending';
+    let applications = [];
+
+    function switchTab(tab) {
+      currentTab = tab;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('tab-btn-' + tab).classList.add('active');
+      document.getElementById('tab-manage').classList.toggle('hidden', tab !== 'manage');
+      document.getElementById('tab-review').classList.toggle('hidden', tab !== 'review');
+      if (tab === 'review') {
+        loadApplications();
+      }
+    }
+
+    async function loadApplications() {
+      try {
+        const res = await fetch('/api/applications');
+        const data = await res.json();
+        if (data.success) {
+          applications = data.applications || [];
+          updateReviewBadge();
+          renderApplications();
+        }
+      } catch (e) {
+        toast('加载申请列表失败', 'error');
+      }
+    }
+
+    function updateReviewBadge() {
+      const pending = applications.filter(a => a.status === 'pending').length;
+      const badge = document.getElementById('review-badge');
+      if (pending > 0) {
+        badge.textContent = pending;
+        badge.classList.remove('hidden');
+      } else {
+        badge.classList.add('hidden');
+      }
+      document.getElementById('pending-count').textContent = pending;
+    }
+
+    function filterApps(status) {
+      appFilter = status;
+      ['pending', 'approved', 'rejected'].forEach(s => {
+        const btn = document.getElementById('app-filter-' + s);
+        if (s === status) {
+          btn.className = 'px-3 py-1.5 rounded-md text-xs font-medium bg-blue-100 text-blue-700 border border-blue-200 transition-colors';
+        } else {
+          btn.className = 'px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors';
+        }
+      });
+      renderApplications();
+    }
+
+    function renderApplications() {
+      const filtered = applications.filter(a => a.status === appFilter);
+      const el = document.getElementById('app-list');
+      document.getElementById('pending-count').textContent =
+        applications.filter(a => a.status === 'pending').length;
+
+      // 更新下发按钮状态
+      const undeployed = applications.filter(a => a.status === 'approved' && !a.deployed);
+      const deployBtn = document.getElementById('review-deploy-btn');
+      if (undeployed.length > 0) {
+        deployBtn.disabled = false;
+        deployBtn.title = `${undeployed.length} 条申请待下发`;
+      } else {
+        deployBtn.disabled = true;
+        deployBtn.title = '';
+      }
+
+      if (!filtered.length) {
+        const labels = { pending: '暂无待审核的申请', approved: '暂无已批准的申请', rejected: '暂无已拒绝的申请' };
+        el.innerHTML = `
+          <div class="bg-white rounded-xl border border-slate-200 shadow-sm px-5 py-12 text-center text-slate-400">
+            <i class="fas fa-inbox text-3xl block mb-2 opacity-30"></i>
+            ${labels[appFilter] || '暂无申请'}
+          </div>`;
+        return;
+      }
+
+      el.innerHTML = filtered.map(a => {
+        const serverNames = (CFG.servers || []);
+        const requestedServers = (a.servers || []).map(h => {
+          const s = serverNames.find(s => s.host === h);
+          return s ? (s.name || s.host) : h;
+        });
+
+        // 有效期显示
+        let expireText;
+        if (a.expire_at) {
+          expireText = formatExpireLabel(a.expire_at);
+        } else if (a.duration && /^\d+[dhm]$/i.test(a.duration)) {
+          const m = a.duration.match(/^(\d+)([dhm])$/i);
+          const units = { d: '天', h: '小时', m: '分钟' };
+          expireText = `申请 ${m[1]} ${units[m[2].toLowerCase()]}`;
+        } else if (a.duration) {
+          expireText = formatExpireLabel(a.duration);
+        } else {
+          expireText = '永久';
+        }
+
+        if (a.status === 'pending') {
+          // 构建服务器勾选列表（默认全选）
+          const srvCheckboxes = (a.servers || []).map(h => {
+            const s = serverNames.find(s => s.host === h);
+            const label = s ? `${s.name || s.host} (${s.host})` : h;
+            return `<label class="flex items-center gap-2 py-1">
+              <input type="checkbox" value="${escAttr(h)}" class="app-srv-cb app-${escAttr(a.id)}-cb w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500" checked>
+              <span class="text-xs text-slate-600">${escHtml(label)}</span>
+            </label>`;
+          }).join('');
+
+          // 审核人可调整有效期（含永久选项）
+          const expireAdjust = `
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-slate-500 whitespace-nowrap">调整有效期:</span>
+              <select id="expire-${escAttr(a.id)}" onchange="onExpirePresetChange(this, 'expire-custom-${escAttr(a.id)}')"
+                class="border border-slate-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                <option value="" selected>不修改</option>
+                <option value="permanent">永久</option>
+                <option value="1d">1 天</option>
+                <option value="7d">7 天</option>
+                <option value="30d">30 天</option>
+                <option value="90d">90 天</option>
+                <option value="custom">自定义...</option>
+              </select>
+              <input id="expire-custom-${escAttr(a.id)}" type="datetime-local"
+                class="hidden border border-slate-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>`;
+
+          return `
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-5 fade-in">
+              <div class="flex items-start justify-between">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2 mb-1">
+                    <span class="text-base font-semibold text-slate-800">${escHtml(a.name || '—')}</span>
+                    <span class="text-sm text-slate-500">(${escHtml(a.employee_id || '—')})</span>
+                    <span class="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-medium">待审核</span>
+                  </div>
+                  <div class="text-sm text-slate-700 mt-1">
+                    <i class="fas fa-bullseye text-slate-400 mr-1.5 text-xs"></i>${escHtml(a.purpose || '—')}
+                  </div>
+                  <div class="text-xs text-slate-400 mt-1.5">
+                    <i class="far fa-clock mr-1.5"></i>${expireText}
+                  </div>
+                  <div class="text-xs text-slate-500 mt-1.5 font-mono">
+                    <i class="fas fa-globe text-slate-400 mr-1.5"></i>${escHtml(a.ip)}
+                    <span class="text-slate-300 ml-2">${escHtml(a.created_at)}</span>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2 ml-3 flex-shrink-0">
+                  <button onclick="reviewApp('${escAttr(a.id)}', 'approve')"
+                    class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
+                    <i class="fas fa-check mr-1"></i>批准所选
+                  </button>
+                  <button onclick="reviewApp('${escAttr(a.id)}', 'reject')"
+                    class="border border-red-200 hover:border-red-300 text-red-600 hover:bg-red-50 px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
+                    <i class="fas fa-xmark mr-1"></i>拒绝
+                  </button>
+                </div>
+              </div>
+              ${expireAdjust}
+              <div class="border-t border-slate-100 pt-3 mt-3">
+                <div class="text-xs text-slate-500 mb-1.5">申请的服务器（可取消勾选来部分批准）：</div>
+                <div class="grid grid-cols-2 gap-x-4">${srvCheckboxes}</div>
+              </div>
+              <div id="app-result-${escAttr(a.id)}" class="hidden mt-3"></div>
+            </div>`;
+        } else {
+          const statusLabel = a.status === 'approved' ? '已批准' : '已拒绝';
+          const statusColor = a.status === 'approved'
+            ? 'bg-green-100 text-green-700'
+            : 'bg-red-100 text-red-700';
+          const approvedInfo = a.approved_servers && a.approved_servers.length
+            ? `<div class="text-xs text-slate-400 mt-1">批准服务器: ${a.approved_servers.map(h => {
+                const s = serverNames.find(s => s.host === h);
+                return escHtml(s ? (s.name || s.host) : h);
+              }).join(', ')}</div>`
+            : '';
+
+          const deployedTag = a.status === 'approved'
+            ? (a.deployed
+                ? '<span class="px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-medium">已下发</span>'
+                : '<span class="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-medium">待下发</span>')
+            : '';
+
+          return `
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-5 fade-in opacity-70">
+              <div class="flex items-start justify-between">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2 mb-1">
+                    <span class="text-base font-semibold text-slate-600">${escHtml(a.name || '—')}</span>
+                    <span class="text-sm text-slate-400">(${escHtml(a.employee_id || '—')})</span>
+                    <span class="px-1.5 py-0.5 rounded-full ${statusColor} text-xs font-medium">${statusLabel}</span>
+                    ${deployedTag}
+                  </div>
+                  <div class="text-sm text-slate-500 mt-1">
+                    <i class="fas fa-bullseye text-slate-300 mr-1.5 text-xs"></i>${escHtml(a.purpose || '—')}
+                  </div>
+                  <div class="text-xs text-slate-400 mt-1.5">
+                    <i class="far fa-clock mr-1.5"></i>${expireText}
+                  </div>
+                  <div class="text-xs text-slate-500 mt-1.5 font-mono">
+                    <i class="fas fa-globe text-slate-400 mr-1.5"></i>${escHtml(a.ip)}
+                    <span class="text-slate-300 ml-2">${escHtml(a.created_at)}</span>
+                  </div>
+                  <div class="text-xs text-slate-400 mt-1.5">申请服务器: ${escHtml(requestedServers.join(', '))}</div>
+                  ${approvedInfo}
+                  ${a.reviewed_at ? `<div class="text-xs text-slate-400 mt-0.5">审核时间: ${escHtml(a.reviewed_at)} · 审核人: ${escHtml(a.reviewed_by || '')}</div>` : ''}
+                </div>
+              </div>
+            </div>`;
+        }
+      }).join('');
+    }
+
+    async function reviewApp(appId, action) {
+      let body = { action };
+      if (action === 'approve') {
+        const checked = document.querySelectorAll(`.app-${appId}-cb:checked`);
+        const servers = Array.from(checked).map(cb => cb.value);
+        if (!servers.length) {
+          toast('请至少勾选一台服务器', 'warn');
+          return;
+        }
+        body.servers = servers;
+        // 收集有效期调整
+        const expirePreset = document.getElementById('expire-' + appId);
+        const expireCustom = document.getElementById('expire-custom-' + appId);
+        if (expirePreset && expirePreset.value) {
+          if (expirePreset.value === 'permanent') {
+            body.expire_at = '';
+          } else if (expirePreset.value === 'custom') {
+            body.expire_at = expireCustom ? expireCustom.value : '';
+          } else {
+            body.expire_at = expirePreset.value;
+          }
+        }
+      } else {
+        if (!confirm('确认拒绝该申请？')) return;
+      }
+
+      try {
+        const res = await fetch(`/api/applications/${encodeURIComponent(appId)}/review`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.success) {
+          toast(data.message, 'success');
+          await loadApplications();
+          await refreshAll();
+        } else {
+          toast(data.message, 'error');
+        }
+      } catch (e) {
+        toast('操作失败', 'error');
+      }
+    }
+
+    async function deployApproved() {
+      const btn = document.getElementById('review-deploy-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> 下发中...';
+
+      try {
+        const res = await fetch('/api/applications/deploy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+
+        // 显示下发日志
+        if (data.deploy_result) {
+          document.getElementById('review-output-log').textContent = data.deploy_result;
+          document.getElementById('review-output-wrap').classList.remove('hidden');
+        }
+        if (data.success) {
+          toast(`下发成功: ${data.success_count}/${data.total} 台`, 'success');
+        } else {
+          const failed = (data.results || []).filter(r => !r.success).map(r => r.server).join(', ');
+          const extra = failed ? ` 失败: ${failed}` : '';
+          toast(data.message + extra, 'error');
+        }
+        await loadApplications();
+        await refreshAll();
+      } catch (e) {
+        toast('下发失败: ' + e.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-paper-plane"></i> 下发待部署';
+        // 重新判断按钮状态
+        renderApplications();
+      }
+    }
+
+    function formatExpireLabel(expire_at) {
+      if (!expire_at) return '永久';
+      try {
+        const exp = new Date(expire_at.replace(' ', 'T'));
+        const now = new Date();
+        const diffMs = exp - now;
+        const diffDays = diffMs / 86400000;
+        if (diffMs <= 0) return '已过期';
+        if (diffDays < 1) return `${Math.ceil(diffMs / 3600000)} 小时`;
+        if (diffDays < 30) return `${Math.ceil(diffDays)} 天`;
+        return `${Math.round(diffDays)} 天`;
+      } catch (e) { return expire_at; }
     }
 
     // ─── 工具 ──────────────────────────────────────────────────────
