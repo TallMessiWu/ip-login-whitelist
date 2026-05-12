@@ -36,28 +36,62 @@ from whitelist_manager import (
     generate_remove_script, generate_audit_log_script,
     run_on_server, get_merged_whitelist, _find_server, _make_ip_entry,
     ip_covered_by_whitelist, get_outgoing_ip, parse_expire,
-    is_entry_expired, CONFIG_FILE,
+    is_entry_expired, CONFIG_FILE, CONFIG_LOCK,
 )
 
 app = Flask(__name__)
 
 
+# ─── 登录速率限制 ─────────────────────────────────────────────────────────────
+
+_LOGIN_RATE_LIMIT: dict = {}          # key=ip, value=[attempt_timestamps]
+_LOGIN_MAX_ATTEMPTS = 10              # 每分钟最多尝试次数
+_LOGIN_RATE_WINDOW = 60               # 窗口秒数
+
+
+def _check_login_rate(ip: str) -> bool:
+    """检查 IP 是否超过登录频率限制。返回 True 表示允许继续。"""
+    now = time.time()
+    attempts = _LOGIN_RATE_LIMIT.get(ip, [])
+    # 清理过期记录
+    attempts = [t for t in attempts if now - t < _LOGIN_RATE_WINDOW]
+    _LOGIN_RATE_LIMIT[ip] = attempts
+    if len(attempts) >= _LOGIN_MAX_ATTEMPTS:
+        return False
+    attempts.append(now)
+    return True
+
+
 # ─── 认证 ─────────────────────────────────────────────────────────────────────
 
-def _hash_password(password: str, salt: str = None) -> str:
-    if salt is None:
-        salt = secrets.token_hex(16)
-    h = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
-    return f"sha256:{salt}:{h}"
+_PBKDF2_ITERATIONS = 200_000
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(),
+                            _PBKDF2_ITERATIONS, dklen=32).hex()
+    return f"pbkdf2:{_PBKDF2_ITERATIONS}:{salt}:{h}"
 
 
 def _verify_password(password: str, stored: str) -> bool:
     try:
-        parts = stored.split(":", 2)
-        if len(parts) != 3 or parts[0] != "sha256":
-            return False
-        _, salt, _ = parts
-        return _hash_password(password, salt) == stored
+        if stored.startswith("sha256:"):
+            # 兼容旧版 SHA-256 哈希
+            parts = stored.split(":", 2)
+            if len(parts) != 3:
+                return False
+            _, salt, old_hash = parts
+            return hashlib.sha256(f"{salt}:{password}".encode()).hexdigest() == old_hash
+        if stored.startswith("pbkdf2:"):
+            parts = stored.split(":", 3)
+            if len(parts) != 4:
+                return False
+            _, iterations, salt, expected = parts
+            h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(),
+                                    int(iterations), dklen=32).hex()
+            return h == expected
+        return False
     except Exception:
         return False
 
@@ -66,8 +100,9 @@ def _get_auth_cfg() -> dict:
     """返回 config.json 中的 auth 配置（不存在则返回默认值）。"""
     try:
         if CONFIG_FILE.exists():
-            with open(CONFIG_FILE, encoding="utf-8") as f:
-                raw = json.load(f)
+            with CONFIG_LOCK:
+                with open(CONFIG_FILE, encoding="utf-8") as f:
+                    raw = json.load(f)
             return raw.get("settings", {}).get("auth", {})
     except Exception:
         pass
@@ -78,8 +113,9 @@ def _setup_app_secret():
     """从 config.json 加载或生成 Flask secret_key，并写回 config。"""
     try:
         if CONFIG_FILE.exists():
-            with open(CONFIG_FILE, encoding="utf-8") as f:
-                raw = json.load(f)
+            with CONFIG_LOCK:
+                with open(CONFIG_FILE, encoding="utf-8") as f:
+                    raw = json.load(f)
             key = raw.get("settings", {}).get("secret_key")
             if key:
                 app.secret_key = key
@@ -94,11 +130,21 @@ def _setup_app_secret():
             auth["username"] = "admin"
         if not auth.get("password_hash"):
             auth["password_hash"] = _hash_password("admin")
+            auth["password_changed"] = False
             print("[INFO] 已初始化默认账户: admin / admin  请登录后及时修改密码")
         save_config(cfg)
         app.secret_key = new_key
     except Exception:
         app.secret_key = secrets.token_hex(32)
+
+
+_PUBLIC_PATHS: set = set()
+
+
+def public_route(rule: str, **options):
+    """标记路由为公开（无需登录）。用法同 @app.route，额外将路径加入公开集。"""
+    _PUBLIC_PATHS.add(rule)
+    return app.route(rule, **options)
 
 
 def _ensure_csrf_token():
@@ -110,9 +156,7 @@ def _ensure_csrf_token():
 @app.before_request
 def _require_login():
     """拦截所有未登录请求，公开路径除外。同时校验 CSRF。"""
-    public = {"/login", "/api/login", "/guest", "/api/guest/replace", "/apply", "/api/apply",
-              "/api/check-my-ip", "/api/servers-public", "/api/csrf-token"}
-    if request.path in public or request.path.startswith("/static/"):
+    if request.path in _PUBLIC_PATHS or request.path.startswith("/static/"):
         _ensure_csrf_token()
         return None
     if not session.get("authenticated"):
@@ -133,27 +177,27 @@ def _require_login():
 
 # ─── 认证路由 ──────────────────────────────────────────────────────────────────
 
-@app.route("/login")
+@public_route("/login")
 def login_page():
     if session.get("authenticated"):
         return redirect(url_for("index"))
     return render_template("login.html")
 
 
-@app.route("/guest")
+@public_route("/guest")
 def guest_page():
     return render_template("guest.html")
 
 
-@app.route("/apply")
+@public_route("/apply")
 def apply_page():
     return render_template("apply.html")
 
 
-@app.route("/api/servers-public")
+@public_route("/api/servers-public")
 def api_servers_public():
     """公开的服务器列表（不含认证信息），供申请页面使用。"""
-    cfg = load_config()
+    cfg = load_config(purge=False)
     servers = [{
         "host": s["host"],
         "name": s.get("name", s["host"]),
@@ -162,8 +206,12 @@ def api_servers_public():
     return jsonify({"success": True, "servers": servers})
 
 
-@app.route("/api/login", methods=["POST"])
+@public_route("/api/login", methods=["POST"])
 def api_login():
+    client_ip = request.remote_addr or ""
+    if not _check_login_rate(client_ip):
+        return jsonify({"success": False, "message": "登录尝试过于频繁，请稍后再试"}), 429
+
     data = request.json or {}
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
@@ -179,11 +227,17 @@ def api_login():
     session.clear()
     session["authenticated"] = True
     session["username"] = username
+
+    # 检查是否需要强制修改默认密码
+    need_change = not auth.get("password_changed", False)
+    if need_change:
+        session["must_change_password"] = True
+
     _ensure_csrf_token()
-    return jsonify({"success": True, "message": "登录成功"})
+    return jsonify({"success": True, "message": "登录成功", "must_change_password": need_change})
 
 
-@app.route("/api/csrf-token")
+@public_route("/api/csrf-token")
 def api_csrf_token():
     _ensure_csrf_token()
     return jsonify({"success": True, "token": session["csrf_token"]})
@@ -195,7 +249,7 @@ def api_logout():
     return jsonify({"success": True})
 
 
-@app.route("/api/guest/replace", methods=["POST"])
+@public_route("/api/guest/replace", methods=["POST"])
 def api_guest_replace():
     """Guest 自助替换 IP：提交替换申请，需管理员审核后执行。"""
     data = request.json or {}
@@ -265,7 +319,7 @@ def api_guest_replace():
 
 # ─── 自助申请白名单 ──────────────────────────────────────────────────────────
 
-@app.route("/api/apply", methods=["POST"])
+@public_route("/api/apply", methods=["POST"])
 def api_apply():
     """用户自助申请加入白名单（无需登录）。"""
     data = request.json or {}
@@ -334,7 +388,7 @@ def api_apply():
 @app.route("/api/applications", methods=["GET"])
 def api_applications_list():
     """获取所有申请列表（管理员）。"""
-    cfg = load_config()
+    cfg = load_config(purge=False)
     apps = cfg.get("applications", [])
     return jsonify({"success": True, "applications": apps})
 
@@ -477,28 +531,24 @@ def api_applications_deploy():
             })
             continue
 
-        buf = io.StringIO()
-        try:
-            script = generate_apply_script(merged, ssh_port, persist)
-            with redirect_stdout(buf):
-                ok = run_on_server(server, script, config=cfg, interactive=False)
-        except Exception as exc:
-            ok = False
-            buf.write(f"[ERROR] {exc}\n")
-
+        script = generate_apply_script(merged, ssh_port, persist)
+        ok, output = capture_run(server, script, config=cfg)
         if ok:
             success_count += 1
         results.append({
             "server": server.get("name", server["host"]),
             "host": server["host"],
             "success": ok,
-            "output": buf.getvalue(),
+            "output": output,
         })
 
-    # 部署成功后标记所有相关申请为已部署
-    if success_count > 0:
-        for a in pending_deploy:
+    # 仅标记所有目标服务器都成功部署的申请为已部署
+    succeeded_hosts = {r["host"] for r in results if r["success"]}
+    for a in pending_deploy:
+        app_servers = set(a.get("approved_servers", []))
+        if app_servers and app_servers.issubset(succeeded_hosts):
             a["deployed"] = True
+    if succeeded_hosts:
         save_config(cfg)
 
     deploy_log = ""
@@ -536,6 +586,8 @@ def api_change_password():
         return jsonify({"success": False, "message": "旧密码错误"}), 403
 
     auth["password_hash"] = _hash_password(new_pw)
+    auth["password_changed"] = True
+    session.pop("must_change_password", None)
     save_config(cfg)
     return jsonify({"success": True, "message": "密码已更新"})
 
@@ -584,7 +636,7 @@ def _scheduler_run_once():
                 return
 
             # ① 读原始 config（不触发 load_config 的自动清除写盘），找出过期条目
-            with open(CONFIG_FILE, encoding="utf-8") as f:
+            with CONFIG_LOCK, open(CONFIG_FILE, encoding="utf-8") as f:
                 raw_cfg = json.load(f)
 
             # 收集过期条目摘要（用于日志展示）
@@ -626,20 +678,13 @@ def _scheduler_run_once():
                     })
                     continue
 
-                buf = io.StringIO()
-                try:
-                    script = generate_apply_script(merged, ssh_port, persist)
-                    with redirect_stdout(buf):
-                        ok = run_on_server(server, script, config=cfg, interactive=False)
-                except Exception as exc:
-                    ok = False
-                    buf.write(f"[ERROR] {exc}\n")
-
+                script = generate_apply_script(merged, ssh_port, persist)
+                ok, output = capture_run(server, script, config=cfg)
                 results.append({
                     "server": server.get("name", server["host"]),
                     "host": server["host"],
                     "success": ok,
-                    "output": buf.getvalue(),
+                    "output": output,
                 })
 
             _sched["last_results"] = results
@@ -683,7 +728,7 @@ def _stop_scheduler():
 def _init_scheduler_from_config():
     """服务启动时，读取 config.json 中的 auto_deploy 设置并初始化调度器。"""
     try:
-        cfg = load_config()
+        cfg = load_config(purge=False)
         ad = cfg.get("settings", {}).get("auto_deploy", {})
         if ad.get("enabled"):
             _sched["interval_minutes"] = int(ad.get("interval_minutes", 5))
@@ -696,14 +741,16 @@ def _init_scheduler_from_config():
 
 @app.route("/api/scheduler", methods=["GET"])
 def api_scheduler_get():
-    t = _sched.get("thread")
-    return jsonify({
-        "enabled": _sched["enabled"] and bool(t and t.is_alive()),
-        "interval_minutes": _sched["interval_minutes"],
-        "last_run_at": _sched["last_run_at"],
-        "last_expired": _sched["last_expired"],
-        "last_results": _sched["last_results"],
-    })
+    with _sched_lock:
+        t = _sched.get("thread")
+        result = {
+            "enabled": _sched["enabled"] and bool(t and t.is_alive()),
+            "interval_minutes": _sched["interval_minutes"],
+            "last_run_at": _sched["last_run_at"],
+            "last_expired": _sched["last_expired"],
+            "last_results": _sched["last_results"],
+        }
+    return jsonify(result)
 
 
 @app.route("/api/scheduler", methods=["PATCH"])
@@ -764,7 +811,7 @@ def index():
 
 @app.route("/api/config")
 def api_config():
-    cfg = load_config()
+    cfg = load_config(purge=False)
     # 不暴露明文密码到前端
     servers_safe = []
     for s in cfg.get("servers", []):
@@ -850,6 +897,10 @@ def api_whitelist_update(ip):
             if any(e["ip"] == new_ip for e in cfg["whitelist"]):
                 return jsonify({"success": False, "message": f"{new_ip} 已在白名单中"}), 409
             entry["ip"] = new_ip
+            # 全局已覆盖新 IP，清理各服务器专属白名单中的重复
+            for srv in cfg.get("servers", []):
+                wl = srv.get("whitelist", [])
+                srv["whitelist"] = [e for e in wl if e["ip"] != new_ip]
 
     if "description" in data:
         entry["description"] = data["description"].strip()
@@ -865,7 +916,7 @@ def api_whitelist_update(ip):
             entry.pop("expire_at", None)
 
     save_config(cfg)
-    return jsonify({"success": True, "message": f"已更新", "entry": entry})
+    return jsonify({"success": True, "message": "已更新", "entry": entry})
 
 
 # ─── API：服务器管理 ──────────────────────────────────────────────────────────
@@ -1048,18 +1099,23 @@ def api_settings():
 
 # ─── API：部署安全自检 ────────────────────────────────────────────────────────
 
-@app.route("/api/check-my-ip")
+@public_route("/api/check-my-ip")
 def api_check_my_ip():
     """检测本机出口 IP 是否在目标服务器白名单中。"""
-    cfg = load_config()
+    cfg = load_config(purge=False)
     server_filter = request.args.get("server") or None
     servers = cfg["servers"]
     if server_filter:
         servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
 
-    # 优先取 X-Forwarded-For（反代场景），否则取 remote_addr
-    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-    http_client_ip = forwarded or request.remote_addr or ""
+    # 仅当请求来自本地反向代理时才信任 X-Forwarded-For
+    remote_addr = request.remote_addr or ""
+    trusted_proxies = {"127.0.0.1", "::1", "localhost"}
+    if remote_addr in trusted_proxies:
+        forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        http_client_ip = forwarded or remote_addr
+    else:
+        http_client_ip = remote_addr
 
     # 若客户端是 localhost，说明 Web 界面本地访问，需探测真实出口 IP
     localhost_addrs = {"127.0.0.1", "::1", "localhost"}
@@ -1105,7 +1161,7 @@ def api_deploy():
 
     # 预先计算每台服务器的合并白名单（全局 + 专属）
     global_whitelist = cfg["whitelist"]
-    server_merged_map = {id(s): get_merged_whitelist(s, global_whitelist) for s in servers}
+    server_merged_map = {s["host"]: get_merged_whitelist(s, global_whitelist) for s in servers}
 
     if all(not m for m in server_merged_map.values()):
         return jsonify({"success": False, "message": "白名单为空，部署会阻断所有 SSH 连接，请先添加 IP"}), 400
@@ -1116,7 +1172,7 @@ def api_deploy():
     results = []
     success_count = 0
     for server in servers:
-        merged = server_merged_map[id(server)]
+        merged = server_merged_map[server["host"]]
         script = generate_apply_script(merged, ssh_port, persist, audit=audit)
         ok, output = capture_run(server, script, dry_run=dry_run, config=cfg)
         if ok:
@@ -1183,7 +1239,7 @@ def api_remove():
 
 @app.route("/api/status")
 def api_status():
-    cfg = load_config()
+    cfg = load_config(purge=False)
     if not cfg["servers"]:
         return jsonify({"success": False, "message": "服务器列表为空"}), 400
 
@@ -1212,7 +1268,7 @@ def api_status():
 
 @app.route("/api/audit-log")
 def api_audit_log():
-    cfg = load_config()
+    cfg = load_config(purge=False)
     if not cfg["servers"]:
         return jsonify({"success": False, "message": "服务器列表为空"}), 400
 
@@ -1250,6 +1306,13 @@ if __name__ == "__main__":
     _setup_app_secret()
     _init_scheduler_from_config()
 
+    # 加固 session cookie 安全属性
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    # SESSION_COOKIE_SECURE 需要 HTTPS，默认不开启。部署在反向代理后可启用。
+
     url = f"http://{args.host}:{args.port}"
     print(f"[OK] 启动 Web 界面: {url}")
+    if args.debug:
+        print("[WARN] debug 模式已开启，生产环境请关闭以禁用远程代码执行调试器")
     app.run(host=args.host, port=args.port, debug=args.debug)

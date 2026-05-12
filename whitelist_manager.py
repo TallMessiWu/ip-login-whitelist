@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 IP Login Whitelist Manager
 通过 iptables 管理服务器 SSH 登录 IP 白名单，支持批量下发生效。
@@ -8,13 +8,20 @@ import json
 import os
 import re
 import sys
+import base64
+import hashlib
+import secrets
 import argparse
 import datetime
 import subprocess
+import threading
 import ipaddress
 import getpass
 from pathlib import Path
 from urllib.parse import urlparse
+
+# 所有 config.json 读写必须持有此锁，防止并发写覆盖和 TOCTOU 竞态
+CONFIG_LOCK = threading.Lock()
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
@@ -50,25 +57,92 @@ def _resolve_proxy(server: dict, config: dict) -> str:
 
 # ─── 配置管理 ────────────────────────────────────────────────────────────────
 
-def load_config() -> dict:
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            config = json.load(f)
-        removed = purge_expired_entries(config)
-        if removed:
-            # 静默回写，不触发 save_config 的 "[OK] 配置已保存" 提示
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-            for scope, e in removed:
-                print(f"[INFO] 已自动清除过期白名单: [{scope}] {e['ip']} (过期于 {e['expire_at']})")
-        return config
-    return json.loads(json.dumps(DEFAULT_CONFIG))
+def load_config(purge: bool = True) -> dict:
+    with CONFIG_LOCK:
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, encoding="utf-8") as f:
+                    config = json.load(f)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                corrupt = CONFIG_FILE.with_suffix(".json.corrupted")
+                try:
+                    os.replace(CONFIG_FILE, corrupt)
+                    print(f"[WARN] config.json 已损坏({e})，已备份为 {corrupt.name}，使用默认配置")
+                except OSError:
+                    print(f"[WARN] config.json 已损坏({e})，无法备份，使用默认配置")
+                return json.loads(json.dumps(DEFAULT_CONFIG))
+            if purge:
+                removed = purge_expired_entries(config)
+                if removed:
+                    # 静默回写，不触发 save_config 的 "[OK] 配置已保存" 提示
+                    _encrypt_passwords(config)
+                    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                        json.dump(config, f, indent=2, ensure_ascii=False)
+                    for scope, e in removed:
+                        print(f"[INFO] 已自动清除过期白名单: [{scope}] {e['ip']} (过期于 {e['expire_at']})")
+            _decrypt_passwords(config)
+            return config
+        return json.loads(json.dumps(DEFAULT_CONFIG))
 
 
 def save_config(config: dict):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    _encrypt_passwords(config)
+    with CONFIG_LOCK:
+        tmp = CONFIG_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, CONFIG_FILE)
     print(f"[OK] 配置已保存到 {CONFIG_FILE}")
+
+
+def _ensure_encryption_key(config: dict) -> bytes:
+    """确保 config 中有加密密钥，不存在则生成。返回密钥 bytes。"""
+    settings = config.setdefault("settings", {})
+    key_b64 = settings.get("encryption_key")
+    if key_b64:
+        return base64.urlsafe_b64decode(key_b64.encode())
+    key = secrets.token_bytes(32)
+    settings["encryption_key"] = base64.urlsafe_b64encode(key).decode()
+    return key
+
+
+_ENCRYPT_MARKER = "enc:"
+
+
+def _encrypt_passwords(config: dict):
+    """加密 config 中所有 server 的 password 字段（跳过已加密的）。"""
+    servers = config.get("servers", [])
+    if not servers:
+        return
+    key = _ensure_encryption_key(config)
+    for srv in servers:
+        pw = srv.get("password", "")
+        if not pw or pw.startswith(_ENCRYPT_MARKER):
+            continue
+        # PBKDF2 派生每个密码独立的加密密钥
+        salt = secrets.token_bytes(16)
+        derived = hashlib.pbkdf2_hmac("sha256", key, salt, 100_000, dklen=len(pw.encode()))
+        encrypted = bytes(a ^ b for a, b in zip(pw.encode(), derived))
+        encrypted_b64 = base64.urlsafe_b64encode(salt + encrypted).decode()
+        srv["password"] = _ENCRYPT_MARKER + encrypted_b64
+
+
+def _decrypt_passwords(config: dict):
+    """解密 config 中所有 server 的 password 字段（仅解密 enc: 前缀的）。"""
+    settings = config.get("settings", {})
+    key_b64 = settings.get("encryption_key")
+    if not key_b64:
+        return
+    key = base64.urlsafe_b64decode(key_b64.encode())
+    for srv in config.get("servers", []):
+        pw = srv.get("password", "")
+        if not pw.startswith(_ENCRYPT_MARKER):
+            continue
+        raw = base64.urlsafe_b64decode(pw[len(_ENCRYPT_MARKER):])
+        salt = raw[:16]
+        encrypted = raw[16:]
+        derived = hashlib.pbkdf2_hmac("sha256", key, salt, 100_000, dklen=len(encrypted))
+        srv["password"] = bytes(a ^ b for a, b in zip(encrypted, derived)).decode()
 
 
 def validate_ip_or_cidr(ip_str: str) -> bool:
@@ -158,7 +232,7 @@ def purge_expired_entries(config: dict) -> list:
 
 def _find_server(config: dict, host_or_name: str) -> dict | None:
     """按 host 或 name 查找服务器，找不到返回 None。"""
-    for s in config["servers"]:
+    for s in config.get("servers", []):
         if s["host"] == host_or_name or s.get("name") == host_or_name:
             return s
     return None
@@ -311,7 +385,7 @@ def cmd_server_add(args):
 
     server = {
         "host": host,
-        "port": args.port or 22,
+        "port": args.port if args.port is not None else 22,
         "user": args.user or "root",
         "key_file": args.key or "",
         "name": args.name or host,
@@ -357,7 +431,7 @@ def cmd_server_list(args):
 # ─── 生成远端执行脚本 ─────────────────────────────────────────────────────────
 
 def generate_apply_script(whitelist: list, ssh_port: int, persist: bool, audit: bool = False) -> str:
-    ip_list = " ".join(e["ip"] for e in whitelist)
+    ip_array_lines = "\n".join(f'"{e["ip"]}"' for e in whitelist)
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     mode_label = "审计模式（只记录，不拦截）" if audit else "生产模式（真实拦截）"
 
@@ -367,7 +441,9 @@ def generate_apply_script(whitelist: list, ssh_port: int, persist: bool, audit: 
 # 运行模式: {mode_label}
 
 SSH_PORT={ssh_port}
-WHITELIST_IPS="{ip_list}"
+WHITELIST_IPS=(
+{ip_array_lines}
+)
 CHAIN="SSH_WHITELIST"
 PERSIST={str(persist).lower()}
 AUDIT={str(audit).lower()}
@@ -375,7 +451,7 @@ AUDIT={str(audit).lower()}
 echo "=== 开始部署 SSH IP 白名单 [{mode_label}] ==="
 echo "服务器: $(hostname)  系统: $(. /etc/os-release 2>/dev/null && echo $NAME $VERSION_ID || uname -r)"
 echo "SSH 端口: $SSH_PORT"
-echo "白名单 IP: $WHITELIST_IPS"
+echo "白名单 IP: ${{WHITELIST_IPS[*]}}"
 echo ""
 
 # ── 检测防火墙管理器 ──────────────────────────────────────────
@@ -399,7 +475,7 @@ if [ "$USE_FIREWALLD" = "true" ]; then
     while IFS= read -r old_rule; do
         [ -z "$old_rule" ] && continue
         firewall-cmd --permanent --remove-rich-rule="$old_rule" &>/dev/null || true
-    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep "port=\\"$SSH_PORT\\"")
+    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep -E "port[ =]+['\"]?$SSH_PORT\b")
 
     if [ "$AUDIT" = "true" ]; then
         # 审计模式：保留 ssh service 开放（不拦截），仅添加全流量日志规则
@@ -408,9 +484,9 @@ if [ "$USE_FIREWALLD" = "true" ]; then
             echo "[INFO] 已开放 ssh service（审计模式不拦截）"
         fi
         # 记录所有 SSH 连接（含白名单和非白名单），用于验证识别效果
-        firewall-cmd --permanent --add-rich-rule="rule family=ipv4 port port=\\"$SSH_PORT\\" protocol=tcp log prefix=\\"SSH_AUDIT: \\" level=\\"warning\\""
+        firewall-cmd --permanent --add-rich-rule="rule family=ipv4 port port=\\"$SSH_PORT\\" protocol=tcp log prefix=\\"SSH_AUDIT\\" level=\\"warning\\""
         # 单独记录白名单 IP（日志前缀不同，方便区分）
-        for ip in $WHITELIST_IPS; do
+        for ip in "${{WHITELIST_IPS[@]}}"; do
             firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=\\"$ip\\" port port=\\"$SSH_PORT\\" protocol=tcp log prefix=\\"SSH_ALLOWED: \\" level=\\"info\\""
             echo "[+] 白名单 IP（审计）: $ip"
         done
@@ -425,7 +501,7 @@ if [ "$USE_FIREWALLD" = "true" ]; then
             firewall-cmd --permanent --remove-service=ssh
             echo "[INFO] 已移除默认 ssh service 开放"
         fi
-        for ip in $WHITELIST_IPS; do
+        for ip in "${{WHITELIST_IPS[@]}}"; do
             firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=\\"$ip\\" port port=\\"$SSH_PORT\\" protocol=tcp accept"
             echo "[+] 允许 IP: $ip"
         done
@@ -452,7 +528,7 @@ iptables -F "$CHAIN" 2>/dev/null || iptables -N "$CHAIN"
 iptables -F "$CHAIN"
 
 # 添加白名单 IP
-for ip in $WHITELIST_IPS; do
+for ip in "${{WHITELIST_IPS[@]}}"; do
     iptables -A "$CHAIN" -s "$ip" -j ACCEPT
     echo "[+] 允许 IP: $ip"
 done
@@ -595,7 +671,7 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
     while IFS= read -r rule; do
         [ -z "$rule" ] && continue
         firewall-cmd --permanent --remove-rich-rule="$rule" && echo "[OK] 已移除: $rule"
-    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep "port=\\"{ssh_port}\\"")
+    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep -E "port[ =]+['\"]?{ssh_port}\b")
     # 恢复默认 ssh service 开放
     firewall-cmd --permanent --add-service=ssh
     firewall-cmd --reload
@@ -841,6 +917,7 @@ def _run_via_subprocess(host, port, user, key_file, password, script, proxy="") 
     env = None
 
     if password and not key_file:
+        fd = -1
         try:
             is_win = platform.system() == "Windows"
             suffix = ".bat" if is_win else ".sh"
@@ -852,6 +929,7 @@ def _run_via_subprocess(host, port, user, key_file, password, script, proxy="") 
                 with os.fdopen(fd, "w") as f:
                     f.write("#!/bin/sh\necho \"$_SSHPWD\"\n")
                 os.chmod(askpass_file, 0o700)
+            fd = -1  # fd 已被 fdopen 消费
 
             env = os.environ.copy()
             env["SSH_ASKPASS"] = askpass_file
@@ -859,6 +937,11 @@ def _run_via_subprocess(host, port, user, key_file, password, script, proxy="") 
             env["_SSHPWD"] = password
         except Exception as e:
             print(f"[WARN] 无法创建 SSH_ASKPASS 脚本: {e}，回退到无密码模式")
+            if fd != -1:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             if askpass_file and os.path.exists(askpass_file):
                 os.unlink(askpass_file)
             askpass_file = None
@@ -966,7 +1049,7 @@ def cmd_deploy(args):
     persist = config["settings"].get("persist_rules", True)
 
     # 预先计算每台服务器的合并白名单，基于合并结果做安全检查和显示
-    server_merged_map = {id(s): get_merged_whitelist(s, whitelist) for s in servers}
+    server_merged_map = {s["host"]: get_merged_whitelist(s, whitelist) for s in servers}
 
     if all(not m for m in server_merged_map.values()):
         print("[ERROR] 白名单为空！部署后将阻断所有 SSH 连接，请先用 `ip add` 添加允许的 IP。")
@@ -974,7 +1057,7 @@ def cmd_deploy(args):
 
     print(f"\n[安全检查] 各服务器实际下发白名单（全局 + 专属）:")
     for s in servers:
-        merged = server_merged_map[id(s)]
+        merged = server_merged_map[s["host"]]
         label = f"{s.get('name', s['host'])} ({s['host']})"
         server_ips = {e["ip"] for e in s.get("whitelist", [])}
         print(f"  服务器: {label}  共 {len(merged)} 个 IP")
@@ -992,7 +1075,7 @@ def cmd_deploy(args):
     locked_out_servers = []
     if my_ip:
         for s in servers:
-            if not ip_covered_by_whitelist(my_ip, server_merged_map[id(s)]):
+            if not ip_covered_by_whitelist(my_ip, server_merged_map[s["host"]]):
                 locked_out_servers.append(s)
         if locked_out_servers:
             print(f"\n{'!'*60}")
