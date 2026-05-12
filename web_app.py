@@ -796,8 +796,20 @@ def api_whitelist_add():
 
     entry = _make_ip_entry(ip, description, expire_at)
     cfg["whitelist"].append(entry)
+
+    # 全局已覆盖，清理各服务器专属白名单中的重复 IP
+    cleaned = 0
+    for srv in cfg.get("servers", []):
+        wl = srv.get("whitelist", [])
+        before = len(wl)
+        srv["whitelist"] = [e for e in wl if e["ip"] != ip]
+        cleaned += before - len(srv["whitelist"])
+
     save_config(cfg)
-    return jsonify({"success": True, "message": f"已添加 {ip}", "entry": entry})
+    msg = f"已添加 {ip}"
+    if cleaned:
+        msg += f"，已从 {cleaned} 台服务器专属白名单中移除（全局已覆盖）"
+    return jsonify({"success": True, "message": msg, "entry": entry})
 
 
 @app.route("/api/whitelist/<path:ip>", methods=["DELETE"])

@@ -223,8 +223,20 @@ def cmd_ip_add(args):
             print(f"[WARN] {ip} 已在全局白名单中，跳过")
             return
         config["whitelist"].append(_make_ip_entry(ip, args.desc, expire_at))
+
+        # 全局已覆盖，清理各服务器专属白名单中的重复 IP
+        cleaned = 0
+        for srv in config.get("servers", []):
+            wl = srv.get("whitelist", [])
+            before = len(wl)
+            srv["whitelist"] = [e for e in wl if e["ip"] != ip]
+            cleaned += before - len(srv["whitelist"])
+
         save_config(config)
-        print(f"[OK] 已添加 {ip} 到全局白名单{expire_label}")
+        msg = f"[OK] 已添加 {ip} 到全局白名单{expire_label}"
+        if cleaned:
+            msg += f"，已从 {cleaned} 台服务器专属白名单中移除（全局已覆盖）"
+        print(msg)
 
 
 def cmd_ip_remove(args):
