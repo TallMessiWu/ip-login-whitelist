@@ -529,6 +529,35 @@
   </div>
 
   <script>
+    // ── CSRF: 非GET请求自动注入X-CSRF-Token ────────────────────
+    let _csrfToken = '';
+
+    async function getCsrfToken() {
+      if (_csrfToken) return _csrfToken;
+      try {
+        const res = await fetch('/api/csrf-token');
+        const data = await res.json();
+        _csrfToken = data.token || '';
+      } catch (e) { _csrfToken = ''; }
+      return _csrfToken;
+    }
+
+    const _origFetch = window.fetch;
+    window.fetch = async function (url, opts = {}) {
+      const method = (opts.method || 'GET').toUpperCase();
+      if (method !== 'GET' && (typeof url === 'string' || url instanceof String)) {
+        const token = await getCsrfToken();
+        if (token) {
+          opts.headers = { ...(opts.headers || {}), 'X-CSRF-Token': token };
+        }
+      }
+      const res = await _origFetch.call(window, url, opts);
+      if (url === '/api/login' || url === '/api/logout') {
+        _csrfToken = '';
+      }
+      return res;
+    };
+
     let CFG = {};
 
     // ─── 数据加载 ──────────────────────────────────────────────────
