@@ -83,4 +83,4 @@ uv run pytest                # 运行测试
 
 ## 代码提交
 
-每次提交前更新此文件（及子模块引用文件）。代码提交时必须使用 gitmoji-commit 这个 skill。
+每次提交前更新 @CLAUDE.md 文件（及子模块引用文件）。代码提交时必须使用 gitmoji-commit 这个 skill。

@@ -1,6 +1,9 @@
 # 运行时生成的配置文件（含服务器列表和明文密码，禁止提交）
 config.json
 
+# 示例配置文件
+example_config.json
+
 # Python
 __pycache__/
 *.pyc
