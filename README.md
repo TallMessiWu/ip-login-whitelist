@@ -11,7 +11,7 @@
 ```bash
 git clone https://github.com/TallMessiWu/ip-login-whitelist.git
 cd ip-login-whitelist
-pip install -r requirements.txt   # flask + paramiko
+pip install -r requirements.txt   # flask>=3.0.0
 ```
 
 `paramiko` 可选，无此包时自动降级为系统 `ssh` 命令；`flask` 仅 Web 界面需要。
@@ -25,18 +25,30 @@ pip install -r requirements.txt   # flask + paramiko
 除 CLI 外，还提供浏览器管理界面：
 
 ```bash
-python web_app.py              # 默认 http://127.0.0.1:8080
-python web_app.py --port 9090  # 自定义端口
+python web_app.py                     # 默认 http://0.0.0.0:6969
+python web_app.py --port 9090         # 自定义端口
+python web_app.py --host 127.0.0.1    # 仅本地访问
 ```
 
-打开浏览器访问即可：
+首次启动自动创建默认管理员账户 `admin / admin`，登录后请及时修改密码。
 
-- **IP 白名单**：在线添加 / 删除白名单 IP，实时生效到 `config.json`
-- **服务器列表**：查看所有托管服务器及认证方式，一键检查各服务器白名单状态
+打开浏览器访问即可使用以下功能：
+
+- **Web 登录认证**：密码哈希（SHA-256 + salt）存储，session 鉴权，支持在线修改密码
+- **IP 白名单**：在线添加 / 删除 / 编辑白名单 IP，支持有效期设置，实时生效到 `config.json`
+- **服务器列表**：查看 / 添加 / 删除托管服务器，支持在线配置密钥、密码、代理
+- **服务器专属白名单**：每台服务器可额外维护专属 IP 白名单，与全局白名单自动合并去重
 - **下发白名单**：支持选择目标服务器、切换审计模式、Dry Run 预览，执行输出实时展示
-- **设置**：在线修改全局 SSH 端口和规则持久化开关
+- **撤销白名单**：一键从服务器移除防火墙规则，恢复所有 IP 可登录
+- **审计日志**：在线查看各服务器审计日志统计
+- **设置**：在线修改全局 SSH 端口、规则持久化开关、全局代理
+- **部署前安全自检**：自动检测浏览器客户端 IP 是否在白名单中，防止误锁定
+- **自助换 IP（Guest）**：无需登录，输入旧 IP 和新 IP 即可自动替换并下发到所有服务器
+- **自助申请白名单**：无需登录，在线提交申请（IP、姓名、工号、用途、时长、目标服务器）
+- **审核审批**：管理员审核申请（批准/拒绝，可部分服务器批准），批准后自动写入白名单
+- **过期自动下发调度器**：后台定时扫描过期条目并自动清除 + 重下发，间隔可配置
 
-> 服务器认证（密钥/密码）仍通过 CLI `server add` 配置，Web 界面不暴露明文密码。
+> 服务器认证（密钥/密码）也可通过 CLI `server add` 配置。
 
 ---
 
@@ -47,8 +59,11 @@ python web_app.py --port 9090  # 自定义端口
 > **重要**：部署前务必先把自己的 IP 加入白名单，否则部署后你也会被锁在外面。
 
 ```bash
-# 添加单个 IP
+# 添加单个 IP（永久有效）
 python whitelist_manager.py ip add 203.0.113.10 --desc "我的办公室"
+
+# 添加带有效期的 IP（7 天后自动过期）
+python whitelist_manager.py ip add 203.0.113.10 --desc "临时访问" --expire 7d
 
 # 添加整个网段（CIDR）
 python whitelist_manager.py ip add 192.168.1.0/24 --desc "公司内网"
@@ -71,6 +86,13 @@ python whitelist_manager.py server add 10.0.1.2 \
     --name "生产服务器2" \
     --user root \
     --password yourpassword
+
+# 通过代理连接
+python whitelist_manager.py server add 10.0.1.3 \
+    --name "内网服务器" \
+    --user root \
+    --key ~/.ssh/id_rsa \
+    --proxy socks5://127.0.0.1:1080
 
 # 查看服务器列表
 python whitelist_manager.py server list
@@ -124,11 +146,20 @@ python whitelist_manager.py deploy --server 10.0.1.1
 
 | 命令 | 说明 |
 |------|------|
-| `ip add <IP或CIDR> [--desc 备注]` | 添加 IP 或网段到白名单 |
-| `ip remove <IP或CIDR>` | 从白名单移除 |
-| `ip list` | 查看全部白名单 |
+| `ip add <IP或CIDR> [--desc 备注] [--expire 有效期] [--server 服务器]` | 添加 IP 或网段到白名单（全局或指定服务器专属） |
+| `ip remove <IP或CIDR> [--server 服务器]` | 从白名单移除 |
+| `ip list [--server 服务器]` | 查看全部白名单（全局或指定服务器专属） |
 
 支持标准 CIDR 格式，如 `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`。
+
+**有效期格式**（`--expire` 参数）：
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| 相对时长 | `7d`、`24h`、`30m` | 相对于当前时刻 |
+| 绝对日期 | `2025-12-31` | 当天 23:59:59 过期 |
+| 绝对时间 | `2025-12-31 23:59:59` | 精确到秒 |
+| 不填 / `never` / `永久` | — | 永久有效 |
 
 ### 服务器管理
 
@@ -201,6 +232,55 @@ pip install PySocks
 
 ---
 
+## 功能详解
+
+### 全局白名单 + 服务器专属白名单
+
+每台服务器有**两层**白名单：
+
+1. **全局白名单**：对所有服务器生效，通过 `ip add`（不加 `--server`）管理
+2. **服务器专属白名单**：仅对指定服务器生效，通过 `ip add --server <host>` 管理
+
+下发时自动合并两层白名单（去重、过滤已过期条目）。添加全局 IP 时自动清除各服务器专属白名单中的重复项。
+
+### 白名单有效期与自动过期
+
+每个白名单条目可设置过期时间。`load_config()` 每次加载配置时自动清除已过期条目。Web 后台调度器可定时扫描过期条目并自动重下发。
+
+### Web 自助申请与审批流程
+
+1. 用户访问 `/apply` 页面，填写 IP、姓名、工号、用途、时长、目标服务器，提交申请
+2. 管理员在 Web 管理界面「审核中心」查看待审核申请
+3. 管理员批准（可部分服务器批准）或拒绝
+4. 批准后 IP 写入相应服务器的专属白名单，然后可手动或通过调度器下发到远端
+
+### Guest 自助换 IP
+
+适用于用户 IP 变更后无法登录服务器的场景：
+
+1. 访问 `/guest` 页面
+2. 输入旧 IP（当前已失效的 IP）和新 IP
+3. 系统搜索全局白名单 + 所有服务器专属白名单，将旧 IP 全部替换为新 IP
+4. 自动下发到所有服务器
+
+### 过期自动下发调度器
+
+Web 后台可选启用的定时任务：
+
+- 按配置间隔（默认 5 分钟）扫描全局和各服务器专属白名单
+- 发现过期条目 → 自动清除 → 对受影响服务器重新下发
+- 通过 Web 界面或 CLI 配置开关和间隔
+
+### 部署安全自检
+
+`deploy` 命令和 Web 下发前会自动检测本机出口 IP 是否在白名单中：
+
+- CLI：通过 socket UDP trick + ipify API 探测出口 IP
+- Web：检测 X-Forwarded-For / remote_addr，本地访问时探测真实出口 IP
+- 若不在白名单中则警告并需要手动确认
+
+---
+
 ## 适配系统说明
 
 工具在远端服务器上自动检测防火墙类型，无需手动配置：
@@ -219,16 +299,21 @@ pip install PySocks
 - `config.json` 含服务器地址和密码，已加入 `.gitignore`，**禁止提交到版本库**
 - 每次 `deploy` 前会列出白名单和目标服务器，默认需手动确认；加 `-y` 可跳过
 - 下发前建议先 `--dry-run` 预览脚本，确认逻辑无误再执行
+- 部署前工具会自动检测本机 IP 是否在白名单中，不在则给出危险警告
 - 如不小心锁定自己，可通过控制台/VNC 登录服务器执行 `remove` 命令撤销
+- Web 首次启动默认账户 `admin / admin`，请登录后立即修改密码
 
 ---
 
 ## 文件说明
 
 ```
-whitelist_manager.py   # CLI 全部功能，单文件
-web_app.py             # Web 管理界面后端（Flask）
-templates/index.html   # Web 管理界面前端
-requirements.txt       # 依赖：paramiko（可选）+ flask（Web 界面需要）
-config.json            # 运行时自动生成，存储白名单和服务器列表（不提交）
+whitelist_manager.py     # CLI 全部功能 + Web 依赖的核心函数库，单文件 ~1220 行
+web_app.py               # Web 管理界面后端（Flask），REST API + 认证 + 后台调度器
+templates/index.html     # Web 管理主界面（白名单/服务器/下发/设置/审核/调度器）
+templates/login.html     # Web 登录页面
+templates/guest.html     # Guest 自助换 IP 页面（无需登录）
+templates/apply.html     # 自助申请白名单页面（无需登录）
+requirements.txt         # 依赖：flask>=3.0.0
+config.json              # 运行时自动生成，存储白名单、服务器、认证等（不提交）
 ```
