@@ -1640,8 +1640,23 @@
                     <span class="text-sm text-slate-500">(${escHtml(a.employee_id || '—')})</span>
                     <span class="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-medium">待审核</span>
                   </div>
-                  <div class="text-sm text-slate-700 mt-1">
-                    <i class="fas fa-bullseye text-slate-400 mr-1.5 text-xs"></i>${escHtml(a.purpose || '—')}
+                  <div class="text-sm text-slate-700 mt-1 flex items-center gap-2">
+                    <i class="fas fa-bullseye text-slate-400 text-xs flex-shrink-0"></i>
+                    <span id="purpose-text-${escAttr(a.id)}">${escHtml(a.purpose || '—')}</span>
+                    <input id="purpose-edit-${escAttr(a.id)}" type="text" value="${escAttr(a.purpose || '')}"
+                      class="hidden border border-slate-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-48">
+                    <button onclick="startEditPurpose('${escAttr(a.id)}')" id="edit-btn-${escAttr(a.id)}"
+                      class="flex-shrink-0 text-slate-400 hover:text-blue-600 transition-colors" title="修改备注">
+                      <i class="fas fa-pen text-xs"></i>
+                    </button>
+                    <button onclick="confirmEditPurpose('${escAttr(a.id)}')" id="confirm-btn-${escAttr(a.id)}"
+                      class="hidden flex-shrink-0 text-blue-600 hover:text-blue-800 transition-colors" title="确认修改">
+                      <i class="fas fa-check text-xs"></i>
+                    </button>
+                    <button onclick="cancelEditPurpose('${escAttr(a.id)}')" id="cancel-btn-${escAttr(a.id)}"
+                      class="hidden flex-shrink-0 text-red-400 hover:text-red-600 transition-colors" title="取消修改">
+                      <i class="fas fa-xmark text-xs"></i>
+                    </button>
                   </div>
                   <div class="text-xs text-slate-400 mt-1.5">
                     <i class="far fa-clock mr-1.5"></i>${expireText}
@@ -1794,6 +1809,11 @@
             body.expire_at = expirePreset.value;
           }
         }
+        // 收集备注修改
+        const purposeEdit = document.getElementById('purpose-edit-' + appId);
+        if (purposeEdit) {
+          body.description = purposeEdit.value;
+        }
       } else {
         if (!confirm('确认拒绝该申请？')) return;
       }
@@ -1815,6 +1835,51 @@
       } catch (e) {
         toast('操作失败', 'error');
       }
+    }
+
+    function startEditPurpose(appId) {
+      const span = document.getElementById('purpose-text-' + appId);
+      const input = document.getElementById('purpose-edit-' + appId);
+      const editBtn = document.getElementById('edit-btn-' + appId);
+      const confirmBtn = document.getElementById('confirm-btn-' + appId);
+      const cancelBtn = document.getElementById('cancel-btn-' + appId);
+      if (!span || !input) return;
+      span.classList.add('hidden');
+      input.classList.remove('hidden');
+      input.focus();
+      editBtn.classList.add('hidden');
+      confirmBtn.classList.remove('hidden');
+      cancelBtn.classList.remove('hidden');
+    }
+
+    function confirmEditPurpose(appId) {
+      const span = document.getElementById('purpose-text-' + appId);
+      const input = document.getElementById('purpose-edit-' + appId);
+      const editBtn = document.getElementById('edit-btn-' + appId);
+      const confirmBtn = document.getElementById('confirm-btn-' + appId);
+      const cancelBtn = document.getElementById('cancel-btn-' + appId);
+      if (!span || !input) return;
+      span.textContent = input.value || '—';
+      input.classList.add('hidden');
+      span.classList.remove('hidden');
+      confirmBtn.classList.add('hidden');
+      cancelBtn.classList.add('hidden');
+      editBtn.classList.remove('hidden');
+    }
+
+    function cancelEditPurpose(appId) {
+      const span = document.getElementById('purpose-text-' + appId);
+      const input = document.getElementById('purpose-edit-' + appId);
+      const editBtn = document.getElementById('edit-btn-' + appId);
+      const confirmBtn = document.getElementById('confirm-btn-' + appId);
+      const cancelBtn = document.getElementById('cancel-btn-' + appId);
+      if (!span || !input) return;
+      input.value = span.textContent === '—' ? '' : span.textContent;
+      input.classList.add('hidden');
+      span.classList.remove('hidden');
+      confirmBtn.classList.add('hidden');
+      cancelBtn.classList.add('hidden');
+      editBtn.classList.remove('hidden');
     }
 
     async function deployApproved() {
