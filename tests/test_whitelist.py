@@ -134,6 +134,25 @@ class TestSaveConfig:
         reloaded = json.loads(tmp_config_file.read_text(encoding="utf-8"))
         assert reloaded["whitelist"][0]["ip"] == "1.2.3.4"
 
+    def test_password_remains_plaintext_in_memory(self, tmp_config_file):
+        """save_config 后 cfg 内存里的密码必须仍是明文，否则后续 SSH 调用会拿到密文。
+
+        回归：之前 _encrypt_passwords 原地改写为 'enc:...'，导致 Guest 自助换 IP 在
+        save_config 后调用 capture_run 时用密文当密码，SSH 报 Permission denied。
+        """
+        cfg = wm.load_config()
+        cfg["servers"].append({
+            "host": "10.99.99.99", "port": 22, "user": "root",
+            "key_file": "", "name": "test-srv",
+            "password": "MySecretPwd123!", "whitelist": [],
+        })
+        wm.save_config(cfg)
+        # 写盘后内存里的密码不能变成 "enc:..."
+        assert cfg["servers"][-1]["password"] == "MySecretPwd123!"
+        # 文件里则应当是加密形式
+        on_disk = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        assert on_disk["servers"][-1]["password"].startswith("enc:")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # validate_ip_or_cidr

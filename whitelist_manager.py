@@ -86,12 +86,16 @@ def load_config(purge: bool = True) -> dict:
 
 
 def save_config(config: dict):
+    # 加密 → 写盘 → 再解密回内存，确保调用者后续仍能取到明文密码（_encrypt_passwords
+    # 是原地修改：若不在此处复原，调用者拿到的 srv["password"] 会变成 "enc:..." 加密串，
+    # 再传给 SSH 子进程就会认证失败。
     _encrypt_passwords(config)
     with CONFIG_LOCK:
         tmp = CONFIG_FILE.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
         os.replace(tmp, CONFIG_FILE)
+    _decrypt_passwords(config)
     print(f"[OK] 配置已保存到 {CONFIG_FILE}")
 
 
