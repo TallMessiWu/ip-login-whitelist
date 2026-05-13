@@ -564,12 +564,13 @@ def api_applications_review(app_id):
             except ValueError:
                 return jsonify({"success": False, "message": f"无效的有效期格式: {stripped}"}), 400
 
-    # 构建备注：审核人可自定义，否则用 <姓名> <工号> <目的>
+    # 构建备注：<姓名> <工号> <目的/自定义备注>
     custom_desc = data.get("description")
+    name_part = f"{app.get('name', '')} {app.get('employee_id', '')}".strip()
     if custom_desc is not None and custom_desc.strip():
-        description = custom_desc.strip()
+        description = f"{name_part} {custom_desc.strip()}".strip()
     else:
-        description = f"{app.get('name', '')} {app.get('employee_id', '')} {app.get('purpose', '')}".strip()
+        description = f"{name_part} {app.get('purpose', '')}".strip()
 
     if is_replace:
         # 替换模式：移除旧 IP，添加新 IP
