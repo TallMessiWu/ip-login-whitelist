@@ -254,7 +254,7 @@
         </button>
         <button onclick="filterApps('self-service')" id="app-filter-self-service"
           class="px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors">
-          <i class="fas fa-rotate text-xs mr-1"></i>自助换 IP <span id="self-service-count" class="ml-1 opacity-70">0</span>
+          <i class="fas fa-rotate text-xs mr-1"></i>自助换 IP记录 <span id="self-service-count" class="ml-1 opacity-70">0</span>
         </button>
         <div class="flex-1"></div>
         <button onclick="deployApproved()" id="review-deploy-btn"
@@ -1536,12 +1536,12 @@
         if (s === status) {
           btn.className = 'px-3 py-1.5 rounded-md text-xs font-medium bg-blue-100 text-blue-700 border border-blue-200 transition-colors';
           if (s === 'self-service') {
-            btn.innerHTML = '<i class="fas fa-rotate text-xs mr-1"></i>自助换 IP <span id="self-service-count" class="ml-1 opacity-70">' + selfServiceRecords.length + '</span>';
+            btn.innerHTML = '<i class="fas fa-rotate text-xs mr-1"></i>自助换 IP记录 <span id="self-service-count" class="ml-1 opacity-70">' + selfServiceRecords.length + '</span>';
           }
         } else {
           btn.className = 'px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors';
           if (s === 'self-service') {
-            btn.innerHTML = '<i class="fas fa-rotate text-xs mr-1"></i>自助换 IP <span id="self-service-count" class="ml-1 opacity-70">' + selfServiceRecords.length + '</span>';
+            btn.innerHTML = '<i class="fas fa-rotate text-xs mr-1"></i>自助换 IP记录 <span id="self-service-count" class="ml-1 opacity-70">' + selfServiceRecords.length + '</span>';
           }
         }
       });
