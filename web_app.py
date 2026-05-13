@@ -272,13 +272,17 @@ def api_guest_replace():
     now = datetime.datetime.now()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 原地更新旧 IP → 新 IP，保留 description / expire_at 等元数据；
-    # 仅刷新 added_at 和 added_by 以保留审计痕迹。
+    # 原地更新旧 IP → 新 IP，保留 description / expire_at 等元数据（仅替换 IP 本身）。
+    # added_by 标记为 guest-self-service 以便审计追溯；added_at 刷新为本次替换时间。
     found_global = False
     affected_server_hosts: list[str] = []
+    original_description = ""
+    original_expire_at = None
 
     for entry in cfg.get("whitelist", []):
         if entry["ip"] == old_ip:
+            original_description = entry.get("description", "") or original_description
+            original_expire_at = entry.get("expire_at") or original_expire_at
             entry["ip"] = new_ip
             entry["added_at"] = now_str
             entry["added_by"] = "guest-self-service"
@@ -288,6 +292,8 @@ def api_guest_replace():
     for srv in cfg.get("servers", []):
         for entry in srv.get("whitelist", []):
             if entry["ip"] == old_ip:
+                original_description = entry.get("description", "") or original_description
+                original_expire_at = entry.get("expire_at") or original_expire_at
                 entry["ip"] = new_ip
                 entry["added_at"] = now_str
                 entry["added_by"] = "guest-self-service"
@@ -306,8 +312,11 @@ def api_guest_replace():
     # 立即持久化白名单变更
     save_config(cfg)
 
-    # 记录审计条目（已自动批准并待下发结果）
+    # 记录审计条目（自动批准，待下发结果；保留原条目的 expire_at / description）
     app_id = now.strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(4)
+    purpose_parts = [f"自助替换: {old_ip} → {new_ip}"]
+    if original_description:
+        purpose_parts.append(f"（原备注: {original_description}）")
     application = {
         "id": app_id,
         "type": "replace",
@@ -315,9 +324,9 @@ def api_guest_replace():
         "old_ip": old_ip,
         "name": "Guest",
         "employee_id": "",
-        "purpose": f"自助替换: {old_ip} → {new_ip}",
+        "purpose": "".join(purpose_parts),
         "duration": "",
-        "expire_at": None,
+        "expire_at": original_expire_at,
         "servers": [s["host"] for s in servers_to_deploy],
         "status": "approved",
         "approved_servers": [s["host"] for s in servers_to_deploy],
@@ -368,8 +377,10 @@ def api_guest_replace():
     deploy_log += f"下发完成: {success_count}/{len(results)} 台成功"
 
     total = len(results)
+    # 替换本身已生效；无服务器时视为成功，否则要求全部服务器下发成功
+    success = total == 0 or success_count == total
     return jsonify({
-        "success": success_count == total and total > 0,
+        "success": success,
         "message": (
             f"已替换 {old_ip} → {new_ip}，下发 {success_count}/{total} 台成功"
             if total > 0 else f"已替换 {old_ip} → {new_ip}（无需下发的服务器）"

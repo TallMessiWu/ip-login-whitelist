@@ -1465,6 +1465,35 @@ class TestWebGuestReplace:
         })
         assert resp.status_code == 404
 
+    def test_replace_preserves_description_and_expire(self, web_client, tmp_config_file):
+        """自助替换必须保留原条目的 description 和 expire_at（保持原有到期时间和备注相同）。"""
+        cfg = {
+            "whitelist": [{
+                "ip": "10.1.1.1",
+                "description": "alice-laptop",
+                "added_by": "admin",
+                "added_at": "2025-01-01 10:00:00",
+                "expire_at": "2030-12-31 23:59:59",
+            }],
+            "servers": [],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        resp = web_client.post("/api/guest/replace", json={
+            "old_ip": "10.1.1.1", "new_ip": "10.2.2.2",
+        })
+        assert resp.status_code == 200
+        assert resp.get_json()["success"] is True
+
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        entry = next(e for e in saved["whitelist"] if e["ip"] == "10.2.2.2")
+        assert entry["description"] == "alice-laptop"
+        assert entry["expire_at"] == "2030-12-31 23:59:59"
+        # 审计申请记录也应携带原 expire_at 与备注
+        app = next(a for a in saved["applications"] if a["type"] == "replace")
+        assert app["expire_at"] == "2030-12-31 23:59:59"
+        assert "alice-laptop" in app["purpose"]
+
 
 # ── /api/config ──────────────────────────────────────────────────────────
 
