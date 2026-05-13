@@ -38,6 +38,7 @@ from whitelist_manager import (
     ip_covered_by_whitelist, get_outgoing_ip, parse_expire,
     is_entry_expired, CONFIG_FILE, CONFIG_LOCK,
 )
+from translations import get_translations, detect_language
 
 app = Flask(__name__)
 
@@ -147,6 +148,16 @@ def public_route(rule: str, **options):
     return app.route(rule, **options)
 
 
+# ─── 模板上下文注入 ──────────────────────────────────────────────────────────
+
+
+@app.context_processor
+def inject_i18n():
+    """向所有模板注入当前语言和翻译字典。"""
+    lang = session.get("lang", "zh")
+    return {"lang": lang, "T": get_translations(lang)}
+
+
 def _ensure_csrf_token():
     """确保 session 中存在 CSRF token。"""
     if "csrf_token" not in session:
@@ -155,7 +166,11 @@ def _ensure_csrf_token():
 
 @app.before_request
 def _require_login():
-    """拦截所有未登录请求，公开路径除外。同时校验 CSRF。"""
+    """拦截所有未登录请求，公开路径除外。同时校验 CSRF、检测语言。"""
+    # 语言检测：session 中无 lang 时从 Accept-Language 推断
+    if "lang" not in session:
+        session["lang"] = detect_language(request.headers.get("Accept-Language", ""))
+
     if request.path in _PUBLIC_PATHS or request.path.startswith("/static/"):
         _ensure_csrf_token()
         return None
@@ -241,6 +256,26 @@ def api_login():
 def api_csrf_token():
     _ensure_csrf_token()
     return jsonify({"success": True, "token": session["csrf_token"]})
+
+
+@public_route("/api/lang", methods=["GET", "PATCH"])
+def api_lang():
+    """获取或切换语言。GET 返回当前语言和全部翻译；PATCH 切换语言。"""
+    if request.method == "PATCH":
+        data = request.json or {}
+        new_lang = (data.get("lang") or "").strip()
+        if new_lang in ("zh", "ru", "en"):
+            session["lang"] = new_lang
+            return jsonify({"success": True, "lang": new_lang})
+        return jsonify({"success": False, "message": "不支持的语言"}), 400
+
+    # GET
+    lang = session.get("lang", "zh")
+    return jsonify({
+        "success": True,
+        "lang": lang,
+        "translations": get_translations(lang),
+    })
 
 
 @app.route("/api/logout", methods=["POST"])

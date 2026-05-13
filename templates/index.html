@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{{ lang }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SSH IP 白名单管理</title>
+  <title data-i18n="app_name">SSH IP 白名单管理</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <style>
@@ -27,29 +27,49 @@
           <i class="fas fa-shield-halved text-white text-sm"></i>
         </div>
         <div>
-          <div class="font-semibold text-slate-800 leading-tight">SSH IP 白名单</div>
-          <div class="text-xs text-slate-400 leading-tight" id="header-summary">加载中...</div>
+          <div class="font-semibold text-slate-800 leading-tight" data-i18n="app_name">SSH IP 白名单</div>
+          <div class="text-xs text-slate-400 leading-tight" id="header-summary" data-i18n="loading">加载中...</div>
         </div>
       </div>
       <div class="flex items-center gap-2">
-        <button onclick="refreshAll()" title="刷新"
+        <!-- 语言切换 -->
+        <div class="relative" id="lang-dropdown">
+          <button onclick="toggleLangMenu()" title="Language"
+            class="flex items-center gap-1.5 text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors text-sm">
+            <i class="fas fa-globe"></i>
+            <span id="current-lang-label">{{ lang.upper() }}</span>
+            <i class="fas fa-chevron-down text-[10px]"></i>
+          </button>
+          <div id="lang-menu" class="hidden absolute right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg py-1 w-28 z-50">
+            <button onclick="switchLang('zh')" class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center justify-between">
+              中文 <span class="text-slate-300 text-[10px]">{{ '✓' if lang == 'zh' else '' }}</span>
+            </button>
+            <button onclick="switchLang('ru')" class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center justify-between">
+              Русский <span class="text-slate-300 text-[10px]">{{ '✓' if lang == 'ru' else '' }}</span>
+            </button>
+            <button onclick="switchLang('en')" class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center justify-between">
+              English <span class="text-slate-300 text-[10px]">{{ '✓' if lang == 'en' else '' }}</span>
+            </button>
+          </div>
+        </div>
+        <button onclick="refreshAll()" title=""
           class="w-8 h-8 flex items-center justify-center rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors">
           <i class="fas fa-rotate-right text-sm" id="refresh-icon"></i>
         </button>
         <button onclick="openSettings()"
           class="flex items-center gap-1.5 text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors text-sm">
           <i class="fas fa-sliders"></i>
-          <span>设置</span>
+          <span data-i18n="settings">设置</span>
         </button>
         <button onclick="openChangePwdModal()"
           class="flex items-center gap-1.5 text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors text-sm">
           <i class="fas fa-key"></i>
-          <span>修改密码</span>
+          <span data-i18n="change_password">修改密码</span>
         </button>
         <button onclick="doLogout()"
           class="flex items-center gap-1.5 text-slate-500 hover:text-red-600 px-3 py-1.5 rounded-md hover:bg-red-50 transition-colors text-sm">
           <i class="fas fa-arrow-right-from-bracket"></i>
-          <span>退出</span>
+          <span data-i18n="logout">退出</span>
         </button>
       </div>
     </div>
@@ -63,10 +83,10 @@
     <!-- Tab 导航 -->
     <div class="flex gap-1 border-b border-slate-200 -mb-3">
       <button onclick="switchTab('manage')" id="tab-btn-manage" class="tab-btn active">
-        <i class="fas fa-sliders"></i> 白名单管理
+        <i class="fas fa-sliders"></i> <span data-i18n="tab_manage">白名单管理</span>
       </button>
       <button onclick="switchTab('review')" id="tab-btn-review" class="tab-btn">
-        <i class="fas fa-clipboard-check"></i> 审核
+        <i class="fas fa-clipboard-check"></i> <span data-i18n="tab_review">审核</span>
         <span id="review-badge" class="hidden px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">0</span>
       </button>
     </div>
@@ -82,40 +102,40 @@
         <div class="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
           <div class="flex items-center gap-2">
             <i class="fas fa-shield-check text-green-500"></i>
-            <span class="font-semibold text-slate-800">IP 白名单</span>
+            <span class="font-semibold text-slate-800" data-i18n="wl_title">IP 白名单</span>
             <span id="wl-badge"
               class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 text-xs font-medium">0</span>
           </div>
           <button onclick="toggleAddForm()"
             class="flex items-center gap-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
-            <i class="fas fa-plus text-xs"></i> 添加 IP
+            <i class="fas fa-plus text-xs"></i> <span data-i18n="wl_add_button">添加 IP</span>
           </button>
         </div>
 
         <!-- 添加表单 -->
         <div id="add-form" class="hidden px-5 py-3 bg-blue-50 border-b border-blue-100">
           <div class="flex gap-2 flex-wrap">
-            <input id="new-ip" type="text" placeholder="IP 或 CIDR，如 192.168.1.1 / 10.0.0.0/24"
+            <input id="new-ip" type="text" data-i18n-placeholder="wl_ip_placeholder"
               class="flex-1 min-w-40 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
               onkeydown="if(event.key==='Enter')addIP()">
-            <input id="new-desc" type="text" placeholder="备注"
+            <input id="new-desc" type="text" data-i18n-placeholder="wl_desc_placeholder"
               class="w-28 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
               onkeydown="if(event.key==='Enter')addIP()">
             <select id="new-expire-preset" onchange="onExpirePresetChange(this, 'new-expire-custom')"
               class="border border-slate-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
-              <option value="">永久</option>
-              <option value="1d">1天</option>
-              <option value="3d">3天</option>
-              <option value="7d">1周</option>
-              <option value="14d">2周</option>
-              <option value="30d">30天</option>
-              <option value="90d">90天</option>
-              <option value="custom">自定义...</option>
+              <option value="" data-i18n="permanent">永久</option>
+              <option value="1d" data-i18n="wl_duration_1d">1天</option>
+              <option value="3d" data-i18n="wl_duration_3d">3天</option>
+              <option value="7d" data-i18n="wl_duration_7d">1周</option>
+              <option value="14d" data-i18n="wl_duration_14d">2周</option>
+              <option value="30d" data-i18n="wl_duration_30d">30天</option>
+              <option value="90d" data-i18n="wl_duration_90d">90天</option>
+              <option value="custom" data-i18n="wl_duration_custom">自定义...</option>
             </select>
             <input id="new-expire-custom" type="datetime-local"
               class="hidden border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
             <button onclick="addIP()"
-              class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-sm transition-colors">添加</button>
+              class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-sm transition-colors" data-i18n="add">添加</button>
             <button onclick="toggleAddForm()"
               class="text-slate-400 hover:text-slate-600 px-2 py-1.5 rounded-md">
               <i class="fas fa-xmark"></i>
@@ -126,7 +146,7 @@
         <!-- 列表 -->
         <div id="wl-list" class="flex-1 divide-y divide-slate-50 overflow-auto max-h-80">
           <div class="px-5 py-10 text-center text-slate-400">
-            <i class="fas fa-circle-notch spin mr-1"></i> 加载中...
+            <i class="fas fa-circle-notch spin mr-1"></i> <span data-i18n="loading">加载中...</span>
           </div>
         </div>
       </div>
@@ -136,25 +156,25 @@
         <div class="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
           <div class="flex items-center gap-2">
             <i class="fas fa-server text-violet-500"></i>
-            <span class="font-semibold text-slate-800">服务器</span>
+            <span class="font-semibold text-slate-800" data-i18n="srv_title">服务器</span>
             <span id="srv-badge"
               class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 text-xs font-medium">0</span>
           </div>
           <div class="flex items-center gap-2">
             <button onclick="checkAllStatus()"
               class="flex items-center gap-1 text-slate-500 hover:text-slate-700 border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
-              <i class="fas fa-heartbeat"></i> 检查状态
+              <i class="fas fa-heartbeat"></i> <span data-i18n="srv_check_status">检查状态</span>
             </button>
             <button onclick="openAddServerModal()"
               class="flex items-center gap-1 bg-violet-600 hover:bg-violet-700 text-white px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
-              <i class="fas fa-plus text-xs"></i> 添加服务器
+              <i class="fas fa-plus text-xs"></i> <span data-i18n="srv_add_button">添加服务器</span>
             </button>
           </div>
         </div>
 
         <div id="srv-list" class="flex-1 divide-y divide-slate-50 overflow-auto max-h-[32rem]">
           <div class="px-5 py-10 text-center text-slate-400">
-            <i class="fas fa-circle-notch spin mr-1"></i> 加载中...
+            <i class="fas fa-circle-notch spin mr-1"></i> <span data-i18n="loading">加载中...</span>
           </div>
         </div>
       </div>
@@ -164,7 +184,7 @@
     <div class="bg-white rounded-xl border border-slate-200 shadow-sm">
       <div class="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
         <i class="fas fa-paper-plane text-orange-500"></i>
-        <span class="font-semibold text-slate-800">下发白名单</span>
+        <span class="font-semibold text-slate-800" data-i18n="deploy_title">下发白名单</span>
       </div>
 
       <div class="px-5 py-4">
@@ -173,10 +193,10 @@
 
           <!-- 目标服务器 -->
           <div class="flex items-center gap-2">
-            <label class="text-slate-600 font-medium whitespace-nowrap">目标服务器</label>
+            <label class="text-slate-600 font-medium whitespace-nowrap" data-i18n="deploy_target">目标服务器</label>
             <select id="deploy-server"
               class="border border-slate-300 rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
-              <option value="">全部</option>
+              <option value="" data-i18n="deploy_all">全部</option>
             </select>
           </div>
 
@@ -187,8 +207,8 @@
               <div class="w-9 h-5 bg-slate-200 peer-checked:bg-amber-400 rounded-full transition-colors duration-200"></div>
               <div class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 peer-checked:translate-x-4"></div>
             </div>
-            <span class="text-slate-700 font-medium">审计模式</span>
-            <span class="text-xs text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full">只记录不拦截</span>
+            <span class="text-slate-700 font-medium" data-i18n="deploy_audit_mode">审计模式</span>
+            <span class="text-xs text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" data-i18n="deploy_audit_hint">只记录不拦截</span>
           </label>
 
           <!-- Dry Run toggle -->
@@ -199,22 +219,22 @@
               <div class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 peer-checked:translate-x-4"></div>
             </div>
             <span class="text-slate-700 font-medium">Dry Run</span>
-            <span class="text-xs text-teal-700 bg-teal-50 border border-teal-200 px-1.5 py-0.5 rounded-full">仅预览</span>
+            <span class="text-xs text-teal-700 bg-teal-50 border border-teal-200 px-1.5 py-0.5 rounded-full" data-i18n="deploy_dry_run_hint">仅预览</span>
           </label>
 
           <!-- 按钮组 -->
           <div class="ml-auto flex gap-2">
             <button onclick="viewAuditLog()" id="audit-log-btn"
               class="flex items-center gap-1.5 border border-slate-200 hover:border-slate-300 text-slate-600 hover:text-slate-800 px-4 py-2 rounded-lg text-sm font-medium transition-colors">
-              <i class="fas fa-scroll"></i> 审计日志
+              <i class="fas fa-scroll"></i> <span data-i18n="deploy_audit_log_btn">审计日志</span>
             </button>
             <button onclick="removeWhitelist()" id="remove-btn"
               class="flex items-center gap-1.5 border border-red-200 hover:border-red-300 text-red-600 hover:text-red-800 hover:bg-red-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-              <i class="fas fa-shield-xmark"></i> 取消白名单
+              <i class="fas fa-shield-xmark"></i> <span data-i18n="deploy_remove_btn">取消白名单</span>
             </button>
             <button onclick="deployWhitelist()" id="deploy-btn"
               class="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-              <i class="fas fa-paper-plane"></i> 下发白名单
+              <i class="fas fa-paper-plane"></i> <span data-i18n="deploy_deploy_btn">下发白名单</span>
             </button>
           </div>
         </div>
@@ -222,9 +242,9 @@
         <!-- 输出区 -->
         <div id="output-wrap" class="hidden">
           <div class="flex items-center justify-between mb-1.5">
-            <span class="text-xs font-medium text-slate-500 uppercase tracking-wide">执行输出</span>
+            <span class="text-xs font-medium text-slate-500 uppercase tracking-wide" data-i18n="deploy_output_title">执行输出</span>
             <button onclick="clearOutput()" class="text-xs text-slate-400 hover:text-slate-600">
-              <i class="fas fa-xmark"></i> 清除
+              <i class="fas fa-xmark"></i> <span data-i18n="deploy_clear_output">清除</span>
             </button>
           </div>
           <div class="log-output bg-slate-900 text-slate-100 rounded-lg px-4 py-3 text-xs leading-relaxed overflow-auto max-h-72">
@@ -242,24 +262,24 @@
       <div class="flex items-center gap-2">
         <button onclick="filterApps('pending')" id="app-filter-pending"
           class="px-3 py-1.5 rounded-md text-xs font-medium bg-blue-100 text-blue-700 border border-blue-200 transition-colors">
-          待审核 <span id="pending-count" class="ml-1 opacity-70">0</span>
+          <span data-i18n="review_pending">待审核</span> <span id="pending-count" class="ml-1 opacity-70">0</span>
         </button>
         <button onclick="filterApps('approved')" id="app-filter-approved"
           class="px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors">
-          已批准
+          <span data-i18n="review_approved">已批准</span>
         </button>
         <button onclick="filterApps('rejected')" id="app-filter-rejected"
           class="px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors">
-          已拒绝
+          <span data-i18n="review_rejected">已拒绝</span>
         </button>
         <button onclick="filterApps('self-service')" id="app-filter-self-service"
           class="px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors">
-          <i class="fas fa-rotate text-xs mr-1"></i>自助换 IP 记录 <span id="self-service-count" class="ml-1 opacity-70">0</span>
+          <i class="fas fa-rotate text-xs mr-1"></i><span data-i18n="review_self_service">自助换 IP 记录</span> <span id="self-service-count" class="ml-1 opacity-70">0</span>
         </button>
         <div class="flex-1"></div>
         <button onclick="deployApproved()" id="review-deploy-btn"
           class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled>
-          <i class="fas fa-paper-plane"></i> 下发待部署
+          <i class="fas fa-paper-plane"></i> <span data-i18n="review_deploy_pending">下发待部署</span>
         </button>
       </div>
 
@@ -274,7 +294,7 @@
       <div id="app-list" class="space-y-4">
         <div class="bg-white rounded-xl border border-slate-200 shadow-sm px-5 py-12 text-center text-slate-400">
           <i class="fas fa-inbox text-3xl block mb-2 opacity-30"></i>
-          暂无申请
+          <span data-i18n="review_no_pending">暂无申请</span>
         </div>
       </div>
     </div><!-- /tab-review -->
@@ -286,52 +306,52 @@
     <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeAddServerModal()"></div>
     <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 fade-in">
       <div class="flex items-center justify-between mb-5">
-        <h3 class="text-base font-semibold text-slate-800">添加服务器</h3>
+        <h3 class="text-base font-semibold text-slate-800" data-i18n="add_srv_title">添加服务器</h3>
         <button onclick="closeAddServerModal()" class="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-md hover:bg-slate-100">
           <i class="fas fa-xmark"></i>
         </button>
       </div>
       <div class="grid grid-cols-2 gap-4">
         <div class="col-span-2">
-          <label class="block text-xs font-medium text-slate-600 mb-1">主机地址 <span class="text-red-400">*</span></label>
+          <label class="block text-xs font-medium text-slate-600 mb-1"><span data-i18n="add_srv_host">主机地址</span> <span class="text-red-400">*</span></label>
           <input id="as-host" type="text" placeholder="10.0.1.1 或 example.com"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">别名</label>
-          <input id="as-name" type="text" placeholder="生产服务器1"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="add_srv_name">别名</label>
+          <input id="as-name" type="text" placeholder=""
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">SSH 端口</label>
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="add_srv_port">SSH 端口</label>
           <input id="as-port" type="number" value="22" min="1" max="65535"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">用户名</label>
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="add_srv_user">用户名</label>
           <input id="as-user" type="text" placeholder="root"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">密码</label>
-          <input id="as-password" type="password" placeholder="SSH 密码（可选）"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="add_srv_password">密码</label>
+          <input id="as-password" type="password" data-i18n-placeholder="add_srv_password_placeholder"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
         </div>
         <div class="col-span-2">
-          <label class="block text-xs font-medium text-slate-600 mb-1">SSH 密钥文件路径</label>
-          <input id="as-key" type="text" placeholder="~/.ssh/id_rsa（可选，优先于密码）"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="add_srv_key">SSH 密钥文件路径</label>
+          <input id="as-key" type="text" data-i18n-placeholder="add_srv_key_placeholder"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
         </div>
         <div class="col-span-2">
-          <label class="block text-xs font-medium text-slate-600 mb-1">代理</label>
-          <input id="as-proxy" type="text" placeholder="socks5://127.0.0.1:1080（可选）"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="add_srv_proxy">代理</label>
+          <input id="as-proxy" type="text" data-i18n-placeholder="add_srv_proxy_placeholder"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
         </div>
       </div>
       <div id="as-err" class="hidden mt-3 text-xs text-red-500 bg-red-50 rounded-lg px-3 py-2"></div>
       <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-100">
-        <button onclick="closeAddServerModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">取消</button>
-        <button onclick="submitAddServer()" class="px-4 py-2 text-sm bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors">添加</button>
+        <button onclick="closeAddServerModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100" data-i18n="cancel">取消</button>
+        <button onclick="submitAddServer()" class="px-4 py-2 text-sm bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors" data-i18n="add">添加</button>
       </div>
     </div>
   </div>
@@ -341,7 +361,7 @@
     <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeEditPwdModal()"></div>
     <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 fade-in">
       <div class="flex items-center justify-between mb-5">
-        <h3 class="text-base font-semibold text-slate-800">更新认证信息</h3>
+        <h3 class="text-base font-semibold text-slate-800" data-i18n="edit_auth_title">更新认证信息</h3>
         <button onclick="closeEditPwdModal()" class="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-md hover:bg-slate-100">
           <i class="fas fa-xmark"></i>
         </button>
@@ -349,19 +369,19 @@
       <input type="hidden" id="ep-host">
       <div class="space-y-3">
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">新密码</label>
-          <input id="ep-password" type="password" placeholder="留空则不修改"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="edit_auth_new_password">新密码</label>
+          <input id="ep-password" type="password" data-i18n-placeholder="edit_auth_password_placeholder"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">SSH 密钥文件路径</label>
-          <input id="ep-key" type="text" placeholder="~/.ssh/id_rsa（留空则不修改）"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="add_srv_key">SSH 密钥文件路径</label>
+          <input id="ep-key" type="text" data-i18n-placeholder="edit_auth_key_placeholder"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
         </div>
       </div>
       <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-100">
-        <button onclick="closeEditPwdModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">取消</button>
-        <button onclick="submitEditPwd()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">保存</button>
+        <button onclick="closeEditPwdModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100" data-i18n="cancel">取消</button>
+        <button onclick="submitEditPwd()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors" data-i18n="save">保存</button>
       </div>
     </div>
   </div>
@@ -371,7 +391,7 @@
     <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeEditIPModal()"></div>
     <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 fade-in">
       <div class="flex items-center justify-between mb-5">
-        <h3 class="text-base font-semibold text-slate-800">编辑白名单条目</h3>
+        <h3 class="text-base font-semibold text-slate-800" data-i18n="edit_ip_title">编辑白名单条目</h3>
         <button onclick="closeEditIPModal()" class="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-md hover:bg-slate-100">
           <i class="fas fa-xmark"></i>
         </button>
@@ -380,30 +400,30 @@
       <input type="hidden" id="ei-scope">
       <div class="space-y-4">
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">IP / CIDR</label>
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="edit_ip_label">IP / CIDR</label>
           <input id="ei-ip-input" type="text" placeholder="192.168.1.1 或 10.0.0.0/24"
             class="font-mono w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             onkeydown="if(event.key==='Enter')submitEditIP()">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">备注</label>
-          <input id="ei-desc" type="text" placeholder="可选备注"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="edit_ip_desc">备注</label>
+          <input id="ei-desc" type="text" data-i18n-placeholder="edit_ip_desc"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             onkeydown="if(event.key==='Enter')submitEditIP()">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">有效期</label>
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="edit_ip_expire_label">有效期</label>
           <div class="flex gap-2">
             <select id="ei-expire-preset" onchange="onExpirePresetChange(this, 'ei-expire-custom')"
               class="flex-1 border border-slate-300 rounded-lg px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
-              <option value="">永久</option>
-              <option value="1d">1天</option>
-              <option value="3d">3天</option>
-              <option value="7d">1周</option>
-              <option value="14d">2周</option>
-              <option value="30d">30天</option>
-              <option value="90d">90天</option>
-              <option value="custom">自定义...</option>
+              <option value="" data-i18n="permanent">永久</option>
+              <option value="1d" data-i18n="wl_duration_1d">1天</option>
+              <option value="3d" data-i18n="wl_duration_3d">3天</option>
+              <option value="7d" data-i18n="wl_duration_7d">1周</option>
+              <option value="14d" data-i18n="wl_duration_14d">2周</option>
+              <option value="30d" data-i18n="wl_duration_30d">30天</option>
+              <option value="90d" data-i18n="wl_duration_90d">90天</option>
+              <option value="custom" data-i18n="wl_duration_custom">自定义...</option>
             </select>
             <input id="ei-expire-custom" type="datetime-local"
               class="hidden flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -413,8 +433,8 @@
       </div>
       <div id="ei-err" class="hidden mt-3 text-xs text-red-500 bg-red-50 rounded-lg px-3 py-2"></div>
       <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-100">
-        <button onclick="closeEditIPModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">取消</button>
-        <button onclick="submitEditIP()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">保存</button>
+        <button onclick="closeEditIPModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100" data-i18n="cancel">取消</button>
+        <button onclick="submitEditIP()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors" data-i18n="save">保存</button>
       </div>
     </div>
   </div>
@@ -424,33 +444,33 @@
     <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeChangePwdModal()"></div>
     <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 fade-in">
       <div class="flex items-center justify-between mb-5">
-        <h3 class="text-base font-semibold text-slate-800">修改密码</h3>
+        <h3 class="text-base font-semibold text-slate-800" data-i18n="change_pwd_title">修改密码</h3>
         <button onclick="closeChangePwdModal()" class="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-md hover:bg-slate-100">
           <i class="fas fa-xmark"></i>
         </button>
       </div>
       <div class="space-y-3">
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">旧密码</label>
-          <input id="cp-old" type="password" placeholder="当前密码"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="change_pwd_old">旧密码</label>
+          <input id="cp-old" type="password" data-i18n-placeholder="change_pwd_old_placeholder"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">新密码</label>
-          <input id="cp-new" type="password" placeholder="至少 6 位"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="change_pwd_new">新密码</label>
+          <input id="cp-new" type="password" data-i18n-placeholder="change_pwd_new_placeholder"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1">确认新密码</label>
-          <input id="cp-confirm" type="password" placeholder="再次输入新密码"
+          <label class="block text-xs font-medium text-slate-600 mb-1" data-i18n="change_pwd_confirm">确认新密码</label>
+          <input id="cp-confirm" type="password" data-i18n-placeholder="change_pwd_confirm_placeholder"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             onkeydown="if(event.key==='Enter')submitChangePwd()">
         </div>
       </div>
       <div id="cp-err" class="hidden mt-3 text-xs text-red-500 bg-red-50 rounded-lg px-3 py-2"></div>
       <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-100">
-        <button onclick="closeChangePwdModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">取消</button>
-        <button onclick="submitChangePwd()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">保存</button>
+        <button onclick="closeChangePwdModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100" data-i18n="cancel">取消</button>
+        <button onclick="submitChangePwd()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors" data-i18n="save">保存</button>
       </div>
     </div>
   </div>
@@ -460,7 +480,7 @@
     <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeSettings()"></div>
     <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 fade-in">
       <div class="flex items-center justify-between mb-5">
-        <h3 class="text-base font-semibold text-slate-800">全局设置</h3>
+        <h3 class="text-base font-semibold text-slate-800" data-i18n="settings_title">全局设置</h3>
         <button onclick="closeSettings()" class="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-md hover:bg-slate-100">
           <i class="fas fa-xmark"></i>
         </button>
@@ -468,16 +488,16 @@
 
       <div class="space-y-5">
         <div>
-          <label class="block text-sm font-medium text-slate-700 mb-1.5">SSH 端口</label>
+          <label class="block text-sm font-medium text-slate-700 mb-1.5" data-i18n="settings_ssh_port">SSH 端口</label>
           <input id="s-port" type="number" min="1" max="65535" placeholder="22"
             class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <p class="mt-1 text-xs text-slate-400">目标服务器的 SSH 监听端口，默认 22</p>
+          <p class="mt-1 text-xs text-slate-400" data-i18n="settings_ssh_port_hint">目标服务器的 SSH 监听端口，默认 22</p>
         </div>
 
         <div class="flex items-center justify-between">
           <div>
-            <div class="text-sm font-medium text-slate-700">规则持久化</div>
-            <div class="text-xs text-slate-400 mt-0.5">重启后自动恢复 iptables 规则</div>
+            <div class="text-sm font-medium text-slate-700" data-i18n="settings_persist">规则持久化</div>
+            <div class="text-xs text-slate-400 mt-0.5" data-i18n="settings_persist_hint">重启后自动恢复 iptables 规则</div>
           </div>
           <label class="flex items-center cursor-pointer">
             <div class="relative">
@@ -492,8 +512,8 @@
         <div class="border-t border-slate-100 pt-4">
           <div class="flex items-center justify-between">
             <div>
-              <div class="text-sm font-medium text-slate-700">过期自动下发</div>
-              <div class="text-xs text-slate-400 mt-0.5">条目到期时自动同步规则到服务器</div>
+              <div class="text-sm font-medium text-slate-700" data-i18n="settings_auto_deploy">过期自动下发</div>
+              <div class="text-xs text-slate-400 mt-0.5" data-i18n="settings_auto_deploy_hint">条目到期时自动同步规则到服务器</div>
             </div>
             <label class="flex items-center cursor-pointer">
               <div class="relative">
@@ -507,32 +527,83 @@
 
           <div id="auto-deploy-config" class="hidden mt-3 space-y-2">
             <div class="flex items-center gap-2">
-              <label class="text-xs text-slate-600 whitespace-nowrap">检查间隔</label>
+              <label class="text-xs text-slate-600 whitespace-nowrap" data-i18n="settings_interval_label">检查间隔</label>
               <select id="s-auto-deploy-interval"
                 class="border border-slate-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-green-500 bg-white">
-                <option value="1">1 分钟</option>
-                <option value="5">5 分钟</option>
-                <option value="15">15 分钟</option>
-                <option value="30">30 分钟</option>
-                <option value="60">1 小时</option>
+                <option value="1" data-i18n="settings_interval_1m">1 分钟</option>
+                <option value="5" data-i18n="settings_interval_5m">5 分钟</option>
+                <option value="15" data-i18n="settings_interval_15m">15 分钟</option>
+                <option value="30" data-i18n="settings_interval_30m">30 分钟</option>
+                <option value="60" data-i18n="settings_interval_1h">1 小时</option>
               </select>
             </div>
             <div id="scheduler-status-box"
               class="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 space-y-0.5">
-              加载中...
+              <span data-i18n="loading">加载中...</span>
             </div>
           </div>
         </div>
       </div>
 
       <div class="flex justify-end gap-2 mt-6 pt-4 border-t border-slate-100">
-        <button onclick="closeSettings()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">取消</button>
-        <button onclick="saveSettings()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">保存</button>
+        <button onclick="closeSettings()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100" data-i18n="cancel">取消</button>
+        <button onclick="saveSettings()" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors" data-i18n="save">保存</button>
       </div>
     </div>
   </div>
 
   <script>
+    // ── i18n 注入 ──────────────────────────────────────────────────
+    window.__LANG = '{{ lang }}';
+    window.__I18N = {{ T | tojson }};
+
+    function t(key, params) {
+      let s = window.__I18N[key] || key;
+      if (params) {
+        Object.keys(params).forEach(function(k) { s = s.replace('{' + k + '}', params[k]); });
+      }
+      return s;
+    }
+
+    // 页面加载时翻译所有 [data-i18n] 和 [data-i18n-placeholder]
+    function i18nPage() {
+      document.querySelectorAll('[data-i18n]').forEach(function(el) {
+        var key = el.getAttribute('data-i18n');
+        if (key) {
+          // 对于 <option> 元素，设置 textContent 而不影响 value
+          el.textContent = t(key);
+        }
+      });
+      document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
+        var key = el.getAttribute('data-i18n-placeholder');
+        if (key) el.placeholder = t(key);
+      });
+      var titleEl = document.querySelector('title[data-i18n]');
+      if (titleEl) document.title = t(titleEl.getAttribute('data-i18n'));
+    }
+    i18nPage();
+
+    // ── 语言切换 ──────────────────────────────────────────────────
+    function toggleLangMenu() {
+      document.getElementById('lang-menu').classList.toggle('hidden');
+    }
+    async function switchLang(lang) {
+      try {
+        await fetch('/api/lang', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lang: lang }),
+        });
+        window.location.reload();
+      } catch(e) { window.location.reload(); }
+    }
+    document.addEventListener('click', function(e) {
+      var dd = document.getElementById('lang-dropdown');
+      if (dd && !dd.contains(e.target)) {
+        document.getElementById('lang-menu').classList.add('hidden');
+      }
+    });
+
     // ── CSRF: 非GET请求自动注入X-CSRF-Token ────────────────────
     let _csrfToken = '';
 
@@ -593,7 +664,7 @@
           }
         } catch (e) { /* 静默失败 */ }
       } catch (e) {
-        toast('加载失败: ' + e.message, 'error');
+        toast(t('load_failed', {msg: e.message}), 'error');
       } finally {
         icon.classList.remove('spin');
       }
@@ -603,7 +674,7 @@
       const wl = (CFG.whitelist || []).length;
       const sv = (CFG.servers || []).length;
       document.getElementById('header-summary').textContent =
-        `${wl} 个白名单 IP · ${sv} 台服务器`;
+        t('header_summary', {wl_count: wl, srv_count: sv});
     }
 
     // ─── 渲染白名单 ────────────────────────────────────────────────
@@ -617,7 +688,7 @@
         el.innerHTML = `
           <div class="px-5 py-10 text-center text-slate-400">
             <i class="fas fa-inbox text-3xl block mb-2 opacity-30"></i>
-            白名单为空，请点击"添加 IP"
+            ${t('wl_empty')}
           </div>`;
         return;
       }
@@ -639,12 +710,12 @@
           <div class="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 ml-2 flex-shrink-0 transition-all">
             <button onclick="openEditIPModal('${escAttr(e.ip)}', '')"
               class="text-blue-400 hover:text-blue-600 hover:bg-blue-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
-              title="编辑">
+              title="${t('edit')}">
               <i class="fas fa-pen text-xs"></i>
             </button>
             <button onclick="removeIP('${escAttr(e.ip)}')"
               class="text-red-400 hover:text-red-600 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
-              title="删除">
+              title="${t('delete')}">
               <i class="fas fa-trash-can text-xs"></i>
             </button>
           </div>
@@ -662,21 +733,21 @@
         el.innerHTML = `
           <div class="px-5 py-10 text-center text-slate-400">
             <i class="fas fa-server text-3xl block mb-2 opacity-20"></i>
-            暂无服务器，点击右上角"添加服务器"
+            ${t('srv_empty')}
           </div>`;
         return;
       }
 
       el.innerHTML = servers.map(s => {
         const authTag = s.key_file
-          ? `<span class="text-xs text-yellow-600 bg-yellow-50 border border-yellow-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-key mr-0.5"></i>密钥</span>`
+          ? `<span class="text-xs text-yellow-600 bg-yellow-50 border border-yellow-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-key mr-0.5"></i>${t('srv_auth_key')}</span>`
           : s.has_password
-          ? `<span class="text-xs text-orange-600 bg-orange-50 border border-orange-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-lock mr-0.5"></i>密码</span>`
-          : `<span class="text-xs text-red-500 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-triangle-exclamation mr-0.5"></i>无认证</span>`;
+          ? `<span class="text-xs text-orange-600 bg-orange-50 border border-orange-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-lock mr-0.5"></i>${t('srv_auth_password')}</span>`
+          : `<span class="text-xs text-red-500 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-triangle-exclamation mr-0.5"></i>${t('srv_auth_none')}</span>`;
 
         const swl = s.whitelist || [];
         const swlBadge = swl.length
-          ? `<span class="text-xs text-indigo-600 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded-full">${swl.length} 条专属</span>`
+          ? `<span class="text-xs text-indigo-600 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded-full">${t('srv_whitelist_count', {n: swl.length})}</span>`
           : '';
 
         const swlRows = swl.map(e => `
@@ -689,12 +760,12 @@
             <div class="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 flex-shrink-0 transition-all">
               <button onclick="openEditIPModal('${escAttr(e.ip)}','${escAttr(s.host)}')"
                 class="text-blue-400 hover:text-blue-600 w-5 h-5 flex items-center justify-center rounded transition-colors"
-                title="编辑">
+                title="${t('edit')}">
                 <i class="fas fa-pen" style="font-size:10px"></i>
               </button>
               <button onclick="removeServerIP('${escAttr(s.host)}','${escAttr(e.ip)}')"
                 class="text-red-400 hover:text-red-600 w-5 h-5 flex items-center justify-center rounded transition-colors"
-                title="删除">
+                title="${t('delete')}">
                 <i class="fas fa-xmark" style="font-size:10px"></i>
               </button>
             </div>
@@ -711,57 +782,59 @@
                   ${swlBadge}
                 </div>
                 <div class="flex items-center gap-1 ml-2 flex-shrink-0">
-                  <button onclick="toggleSrvWL('${escAttr(s.host)}')" title="专属白名单"
+                  <button onclick="toggleSrvWL('${escAttr(s.host)}')" title="${t('srv_exclusive_wl_title')}"
                     class="text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
                     <i class="fas fa-list-check text-xs"></i>
                   </button>
-                  <button onclick="openEditPwdModal('${escAttr(s.host)}')" title="更新认证"
+                  <button onclick="openEditPwdModal('${escAttr(s.host)}')" title="${t('edit_auth_title')}"
                     class="text-blue-400 hover:text-blue-600 hover:bg-blue-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
                     <i class="fas fa-key text-xs"></i>
                   </button>
-                  <button onclick="removeServer('${escAttr(s.host)}')" title="删除服务器"
+                  <button onclick="removeServer('${escAttr(s.host)}')" title="${t('delete')}"
                     class="text-red-400 hover:text-red-600 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
                     <i class="fas fa-trash-can text-xs"></i>
                   </button>
                 </div>
               </div>
-              <div class="ml-5 text-xs text-slate-400 mt-0.5">${escHtml(s.user)}@${escHtml(s.host)}:${s.port || 22}${s.proxy ? ' · 代理: '+escHtml(s.proxy) : ''}</div>
+              <div class="ml-5 text-xs text-slate-400 mt-0.5">${escHtml(s.user)}@${escHtml(s.host)}:${s.port || 22}${s.proxy ? ' · proxy: '+escHtml(s.proxy) : ''}</div>
             </div>
 
             <!-- 专属白名单面板 -->
             <div id="swl-${escAttr(s.host)}" class="hidden px-5 pb-3 bg-indigo-50 border-t border-indigo-100">
               <div class="pt-2.5 pb-1 flex items-center justify-between">
-                <span class="text-xs font-semibold text-indigo-700">专属白名单（叠加在全局之上）</span>
+                <span class="text-xs font-semibold text-indigo-700">${t('srv_exclusive_wl_title')}</span>
               </div>
               <div id="swl-rows-${escAttr(s.host)}" class="space-y-0.5 mb-2">
-                ${swlRows || '<div class="text-xs text-slate-400 py-1">暂无专属 IP</div>'}
+                ${swlRows || `<div class="text-xs text-slate-400 py-1">${t('srv_no_exclusive')}</div>`}
               </div>
               <div class="flex gap-2 flex-wrap">
-                <input id="swl-ip-${escAttr(s.host)}" type="text" placeholder="添加 IP / CIDR"
+                <input id="swl-ip-${escAttr(s.host)}" type="text" data-i18n-placeholder="srv_add_ip_placeholder"
                   class="flex-1 min-w-32 border border-indigo-200 rounded-md px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
                   onkeydown="if(event.key==='Enter')addServerIP('${escAttr(s.host)}')">
-                <input id="swl-desc-${escAttr(s.host)}" type="text" placeholder="备注"
+                <input id="swl-desc-${escAttr(s.host)}" type="text" data-i18n-placeholder="wl_desc_placeholder"
                   class="w-20 border border-indigo-200 rounded-md px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
                   onkeydown="if(event.key==='Enter')addServerIP('${escAttr(s.host)}')">
                 <select id="swl-expire-${escAttr(s.host)}" onchange="onExpirePresetChange(this, 'swl-expire-custom-${escAttr(s.host)}')"
                   class="border border-indigo-200 rounded-md px-1.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white">
-                  <option value="">永久</option>
-                  <option value="1d">1天</option>
-                  <option value="3d">3天</option>
-                  <option value="7d">1周</option>
-                  <option value="14d">2周</option>
-                  <option value="30d">30天</option>
-                  <option value="90d">90天</option>
-                  <option value="custom">自定义...</option>
+                  <option value="" data-i18n="permanent">永久</option>
+                  <option value="1d" data-i18n="wl_duration_1d">1天</option>
+                  <option value="3d" data-i18n="wl_duration_3d">3天</option>
+                  <option value="7d" data-i18n="wl_duration_7d">1周</option>
+                  <option value="14d" data-i18n="wl_duration_14d">2周</option>
+                  <option value="30d" data-i18n="wl_duration_30d">30天</option>
+                  <option value="90d" data-i18n="wl_duration_90d">90天</option>
+                  <option value="custom" data-i18n="wl_duration_custom">自定义...</option>
                 </select>
                 <input id="swl-expire-custom-${escAttr(s.host)}" type="datetime-local"
                   class="hidden border border-indigo-200 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white">
                 <button onclick="addServerIP('${escAttr(s.host)}')"
-                  class="bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-1 rounded-md text-xs transition-colors">添加</button>
+                  class="bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-1 rounded-md text-xs transition-colors" data-i18n="add">添加</button>
               </div>
             </div>
           </div>`;
       }).join('');
+      // 翻译动态生成的内容中的 data-i18n 元素
+      setTimeout(i18nPage, 0);
     }
 
     function toggleSrvWL(host) {
@@ -778,7 +851,10 @@
       });
       document.getElementById('as-err').classList.add('hidden');
       document.getElementById('add-server-modal').classList.remove('hidden');
-      setTimeout(() => document.getElementById('as-host').focus(), 50);
+      setTimeout(function() {
+        i18nPage();
+        document.getElementById('as-host').focus();
+      }, 50);
     }
 
     function closeAddServerModal() {
@@ -788,7 +864,7 @@
     async function submitAddServer() {
       const host = document.getElementById('as-host').value.trim();
       if (!host) {
-        showAsErr('主机地址不能为空');
+        showAsErr(t('add_srv_host_required'));
         return;
       }
       const body = {
@@ -815,7 +891,7 @@
           showAsErr(data.message);
         }
       } catch (e) {
-        showAsErr('请求失败: ' + e.message);
+        showAsErr(t('request_failed', {msg: e.message}));
       }
     }
 
@@ -828,18 +904,18 @@
     async function removeServer(host) {
       const srv = (CFG.servers || []).find(s => s.host === host);
       const name = srv ? (srv.name || host) : host;
-      if (!confirm(`确认删除服务器 "${name}"？`)) return;
+      if (!confirm(t('srv_confirm_remove', {name: name}))) return;
       try {
         const res = await fetch(`/api/servers/${encodeURIComponent(host)}`, { method: 'DELETE' });
         const data = await res.json();
         if (data.success) {
-          toast(data.message, 'success');
+          toast(data.message || t('srv_removed', {host: host}), 'success');
           await refreshAll();
         } else {
           toast(data.message, 'error');
         }
       } catch (e) {
-        toast('操作失败', 'error');
+        toast(t('operation_failed'), 'error');
       }
     }
 
@@ -848,6 +924,7 @@
       document.getElementById('ep-password').value = '';
       document.getElementById('ep-key').value = '';
       document.getElementById('edit-pwd-modal').classList.remove('hidden');
+      i18nPage();
       setTimeout(() => document.getElementById('ep-password').focus(), 50);
     }
 
@@ -860,7 +937,7 @@
       const password = document.getElementById('ep-password').value;
       const key_file = document.getElementById('ep-key').value.trim();
       if (!password && !key_file) {
-        toast('请至少填写密码或密钥路径之一', 'warn');
+        toast(t('edit_auth_fill_one'), 'warn');
         return;
       }
       const body = {};
@@ -875,13 +952,13 @@
         const data = await res.json();
         if (data.success) {
           closeEditPwdModal();
-          toast('认证信息已更新', 'success');
+          toast(t('srv_auth_updated'), 'success');
           await refreshAll();
         } else {
           toast(data.message, 'error');
         }
       } catch (e) {
-        toast('操作失败', 'error');
+        toast(t('operation_failed'), 'error');
       }
     }
 
@@ -902,19 +979,18 @@
         if (data.success) {
           toast(data.message, 'success');
           await refreshAll();
-          // 刷新后重新展开该服务器的白名单面板
           const el = document.getElementById('swl-' + host);
           if (el) el.classList.remove('hidden');
         } else {
           toast(data.message, 'error');
         }
       } catch (e) {
-        toast('操作失败', 'error');
+        toast(t('operation_failed'), 'error');
       }
     }
 
     async function removeServerIP(host, ip) {
-      if (!confirm(`从 ${host} 的专属白名单移除 ${ip}？`)) return;
+      if (!confirm(t('srv_confirm_remove_ip', {host: host, ip: ip}))) return;
       try {
         const res = await fetch(`/api/servers/${encodeURIComponent(host)}/whitelist/${encodeURIComponent(ip)}`, { method: 'DELETE' });
         const data = await res.json();
@@ -927,14 +1003,13 @@
           toast(data.message, 'error');
         }
       } catch (e) {
-        toast('操作失败', 'error');
+        toast(t('operation_failed'), 'error');
       }
     }
 
     // ─── 编辑白名单条目 ────────────────────────────────────────────
 
     function openEditIPModal(ip, scope) {
-      // 从内存中找当前条目数据
       let entry;
       if (scope) {
         const srv = (CFG.servers || []).find(s => s.host === scope);
@@ -942,7 +1017,7 @@
       } else {
         entry = (CFG.whitelist || []).find(e => e.ip === ip);
       }
-      if (!entry) { toast('找不到该条目', 'error'); return; }
+      if (!entry) { toast(t('edit_ip_not_found'), 'error'); return; }
 
       document.getElementById('ei-ip').value = ip;
       document.getElementById('ei-scope').value = scope;
@@ -955,18 +1030,18 @@
       const hint   = document.getElementById('ei-current-expire');
 
       if (entry.expire_at) {
-        // 当前有过期时间：默认显示自定义输入框并填入当前值
         preset.value = 'custom';
         custom.value = entry.expire_at.replace(' ', 'T').substring(0, 16);
         custom.classList.remove('hidden');
-        hint.textContent = `当前到期时间: ${entry.expire_at}`;
+        hint.textContent = t('edit_ip_current_expire', {expire: entry.expire_at});
       } else {
         preset.value = '';
         custom.classList.add('hidden');
-        hint.textContent = '当前设置: 永久';
+        hint.textContent = t('edit_ip_current_permanent');
       }
 
       document.getElementById('edit-ip-modal').classList.remove('hidden');
+      i18nPage();
       setTimeout(() => document.getElementById('ei-ip-input').focus(), 50);
     }
 
@@ -981,7 +1056,7 @@
       const desc    = document.getElementById('ei-desc').value.trim();
       const expire_at = getExpireValue('ei-expire-preset', 'ei-expire-custom');
 
-      if (!newIp) { toast('IP 不能为空', 'warn'); return; }
+      if (!newIp) { toast(t('wl_ip_placeholder'), 'warn'); return; }
 
       const url = scope
         ? `/api/servers/${encodeURIComponent(scope)}/whitelist/${encodeURIComponent(origIp)}`
@@ -999,9 +1074,8 @@
         const data = await res.json();
         if (data.success) {
           closeEditIPModal();
-          toast(data.message, 'success');
+          toast(data.message || t('edit_ip_updated'), 'success');
           await refreshAll();
-          // 如果是专属白名单，刷新后重新展开面板
           if (scope) {
             const el = document.getElementById('swl-' + scope);
             if (el) el.classList.remove('hidden');
@@ -1011,7 +1085,7 @@
           errEl.classList.remove('hidden');
         }
       } catch (e) {
-        errEl.textContent = '请求失败: ' + e.message;
+        errEl.textContent = t('request_failed', {msg: e.message});
         errEl.classList.remove('hidden');
       }
     }
@@ -1021,7 +1095,7 @@
     function syncDeploySelect() {
       const sel = document.getElementById('deploy-server');
       const prev = sel.value;
-      sel.innerHTML = '<option value="">全部服务器</option>' +
+      sel.innerHTML = '<option value="">' + t('deploy_all') + '</option>' +
         (CFG.servers || []).map(s =>
           `<option value="${escAttr(s.host)}">${escHtml(s.name || s.host)}</option>`
         ).join('');
@@ -1035,6 +1109,7 @@
       form.classList.toggle('hidden');
       if (!form.classList.contains('hidden')) {
         document.getElementById('new-ip').focus();
+        i18nPage();
       }
     }
 
@@ -1062,23 +1137,23 @@
           toast(data.message, 'error');
         }
       } catch (e) {
-        toast('操作失败', 'error');
+        toast(t('operation_failed'), 'error');
       }
     }
 
     async function removeIP(ip) {
-      if (!confirm(`确认从白名单移除 ${ip}？`)) return;
+      if (!confirm(t('wl_confirm_remove', {ip: ip}))) return;
       try {
         const res = await fetch(`/api/whitelist/${encodeURIComponent(ip)}`, { method: 'DELETE' });
         const data = await res.json();
         if (data.success) {
-          toast(data.message, 'success');
+          toast(data.message || t('wl_removed', {ip: ip}), 'success');
           await refreshAll();
         } else {
           toast(data.message, 'error');
         }
       } catch (e) {
-        toast('操作失败', 'error');
+        toast(t('operation_failed'), 'error');
       }
     }
 
@@ -1089,7 +1164,7 @@
       const audit = document.getElementById('audit-mode').checked;
       const dry_run = document.getElementById('dry-run').checked;
 
-      // 安全自检：确认本机 IP 在白名单中
+      // 安全自检
       if (!dry_run) {
         try {
           const checkUrl = '/api/check-my-ip' + (server ? `?server=${encodeURIComponent(server)}` : '');
@@ -1098,22 +1173,21 @@
           if (!checkData.safe) {
             const serverNames = checkData.locked_out_servers.map(s => `${s.name} (${s.host})`).join('、');
             const confirmed = confirm(
-              `⚠️ 危险操作警告\n\n检测到你的当前 IP ${checkData.client_ip} 不在以下服务器的白名单中：\n${serverNames}\n\n部署后你将无法通过 SSH 登录这些服务器！\n\n确定仍要继续吗？`
+              t('deploy_safety_warning', {ip: checkData.client_ip, servers: serverNames})
             );
             if (!confirmed) return;
           }
         } catch (e) {
-          // 检测失败不阻断，但提示用户
-          const confirmed = confirm('⚠️ 无法自动检测本机 IP，请确认你的 IP 已加入白名单后再继续。\n\n是否继续部署？');
+          const confirmed = confirm(t('deploy_cannot_detect'));
           if (!confirmed) return;
         }
       }
 
       const btn = document.getElementById('deploy-btn');
       btn.disabled = true;
-      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> 下发中...';
+      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> ' + t('deploy_connecting');
 
-      showOutput('正在连接服务器，请稍候...\n');
+      showOutput(t('deploy_connecting'));
 
       try {
         const res = await fetch('/api/deploy', {
@@ -1126,27 +1200,27 @@
         if (data.results) {
           let log = '';
           data.results.forEach(r => {
-            log += `${'═'.repeat(56)}\n`;
-            log += `  服务器: ${r.server} (${r.host})  ${r.success ? '✓ 成功' : '✗ 失败'}\n`;
-            log += `${'─'.repeat(56)}\n`;
+            log += '═'.repeat(56) + '\n';
+            log += `  ${r.server} (${r.host})  ${r.success ? t('deploy_server_success') : t('deploy_server_fail')}\n`;
+            log += '─'.repeat(56) + '\n';
             log += r.output.trimEnd() + '\n\n';
           });
-          log += `完成: ${data.success_count}/${data.total} 台成功`;
+          log += t('deploy_complete', {success: data.success_count, total: data.total});
           showOutput(log);
 
           const type = data.success_count === data.total ? 'success'
             : data.success_count > 0 ? 'warn' : 'error';
-          toast(`部署完成: ${data.success_count}/${data.total} 台成功`, type);
+          toast(t('deploy_complete', {success: data.success_count, total: data.total}), type);
         } else {
-          showOutput(data.message || '请求失败');
-          toast(data.message || '部署失败', 'error');
+          showOutput(data.message || t('operation_failed'));
+          toast(data.message || t('operation_failed'), 'error');
         }
       } catch (e) {
         showOutput('[ERROR] ' + e.message);
-        toast('请求失败', 'error');
+        toast(t('request_failed', {msg: ''}), 'error');
       } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-paper-plane"></i> 下发白名单';
+        btn.innerHTML = '<i class="fas fa-paper-plane"></i> ' + t('deploy_deploy_btn');
       }
     }
 
@@ -1158,15 +1232,15 @@
 
       const targetLabel = server
         ? (CFG.servers || []).find(s => s.host === server)?.name || server
-        : '全部服务器';
+        : t('deploy_all');
 
-      if (!dry_run && !confirm(`确认从「${targetLabel}」移除 SSH 白名单限制？\n\n移除后该服务器将允许所有 IP 登录，请确认这是你的意图。`)) return;
+      if (!dry_run && !confirm(t('deploy_remove_confirm', {target: targetLabel}))) return;
 
       const btn = document.getElementById('remove-btn');
       btn.disabled = true;
-      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> 移除中...';
+      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> ' + t('deploy_removing');
 
-      showOutput('正在连接服务器，移除白名单规则...\n');
+      showOutput(t('deploy_removing'));
 
       try {
         const res = await fetch('/api/remove', {
@@ -1179,27 +1253,27 @@
         if (data.results) {
           let log = '';
           data.results.forEach(r => {
-            log += `${'═'.repeat(56)}\n`;
-            log += `  服务器: ${r.server} (${r.host})  ${r.success ? '✓ 成功' : '✗ 失败'}\n`;
-            log += `${'─'.repeat(56)}\n`;
+            log += '═'.repeat(56) + '\n';
+            log += `  ${r.server} (${r.host})  ${r.success ? t('deploy_server_success') : t('deploy_server_fail')}\n`;
+            log += '─'.repeat(56) + '\n';
             log += r.output.trimEnd() + '\n\n';
           });
-          log += `完成: ${data.success_count}/${data.total} 台成功`;
+          log += t('deploy_complete', {success: data.success_count, total: data.total});
           showOutput(log);
 
           const type = data.success_count === data.total ? 'success'
             : data.success_count > 0 ? 'warn' : 'error';
-          toast(`取消白名单: ${data.success_count}/${data.total} 台成功`, type);
+          toast(t('deploy_complete', {success: data.success_count, total: data.total}), type);
         } else {
-          showOutput(data.message || '请求失败');
-          toast(data.message || '操作失败', 'error');
+          showOutput(data.message || t('operation_failed'));
+          toast(data.message || t('operation_failed'), 'error');
         }
       } catch (e) {
         showOutput('[ERROR] ' + e.message);
-        toast('请求失败', 'error');
+        toast(t('request_failed', {msg: ''}), 'error');
       } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-shield-xmark"></i> 取消白名单';
+        btn.innerHTML = '<i class="fas fa-shield-xmark"></i> ' + t('deploy_remove_btn');
       }
     }
 
@@ -1207,16 +1281,15 @@
 
     async function checkAllStatus() {
       const btn = document.querySelector('[onclick="checkAllStatus()"]');
-      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> 检查中...';
+      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> ' + t('srv_checking');
       btn.disabled = true;
 
-      // 先把所有圆点变为灰色（检查中）
       (CFG.servers || []).forEach(s => {
         const dot = document.getElementById('dot-' + s.host);
         if (dot) dot.className = 'fas fa-circle text-slate-300 text-xs';
       });
 
-      showOutput('正在检查各服务器白名单状态...\n');
+      showOutput(t('deploy_checking_status'));
 
       try {
         const res = await fetch('/api/status');
@@ -1225,12 +1298,11 @@
         if (data.results) {
           let log = '';
           data.results.forEach(r => {
-            log += `${'═'.repeat(56)}\n`;
-            log += `  服务器: ${r.server} (${r.host})  ${r.success ? '✓' : '✗'}\n`;
-            log += `${'─'.repeat(56)}\n`;
+            log += '═'.repeat(56) + '\n';
+            log += `  ${r.server} (${r.host})  ${r.success ? '✓' : '✗'}\n`;
+            log += '─'.repeat(56) + '\n';
             log += r.output.trimEnd() + '\n\n';
 
-            // 更新圆点颜色
             const dot = document.getElementById('dot-' + r.host);
             if (dot) {
               dot.className = r.success
@@ -1241,9 +1313,9 @@
           showOutput(log.trimEnd());
         }
       } catch (e) {
-        toast('状态检查失败', 'error');
+        toast(t('status_check_failed'), 'error');
       } finally {
-        btn.innerHTML = '<i class="fas fa-heartbeat"></i> 检查状态';
+        btn.innerHTML = '<i class="fas fa-heartbeat"></i> ' + t('srv_check_status');
         btn.disabled = false;
       }
     }
@@ -1253,10 +1325,10 @@
     async function viewAuditLog() {
       const server = document.getElementById('deploy-server').value || '';
       const btn = document.getElementById('audit-log-btn');
-      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> 加载中...';
+      btn.innerHTML = '<i class="fas fa-circle-notch spin"></i> ' + t('loading');
       btn.disabled = true;
 
-      showOutput('正在拉取审计日志...\n');
+      showOutput(t('deploy_loading_logs'));
 
       try {
         const qs = server ? `?server=${encodeURIComponent(server)}` : '';
@@ -1266,19 +1338,19 @@
         if (data.results) {
           let log = '';
           data.results.forEach(r => {
-            log += `${'═'.repeat(56)}\n`;
-            log += `  服务器: ${r.server} (${r.host})\n`;
-            log += `${'─'.repeat(56)}\n`;
+            log += '═'.repeat(56) + '\n';
+            log += `  ${r.server} (${r.host})\n`;
+            log += '─'.repeat(56) + '\n';
             log += r.output.trimEnd() + '\n\n';
           });
-          showOutput(log.trimEnd() || '（无日志）');
+          showOutput(log.trimEnd() || t('deploy_no_logs'));
         } else {
-          showOutput(data.message || '加载失败');
+          showOutput(data.message || t('load_failed', {msg: ''}));
         }
       } catch (e) {
-        toast('加载审计日志失败', 'error');
+        toast(t('audit_log_failed'), 'error');
       } finally {
-        btn.innerHTML = '<i class="fas fa-scroll"></i> 审计日志';
+        btn.innerHTML = '<i class="fas fa-scroll"></i> ' + t('deploy_audit_log_btn');
         btn.disabled = false;
       }
     }
@@ -1303,7 +1375,6 @@
       document.getElementById('s-port').value = s.ssh_port || 22;
       document.getElementById('s-persist').checked = s.persist_rules !== false;
 
-      // 加载调度器状态
       try {
         const res = await fetch('/api/scheduler');
         const sched = await res.json();
@@ -1315,6 +1386,7 @@
       } catch (e) { /* ignore */ }
 
       document.getElementById('settings-modal').classList.remove('hidden');
+      i18nPage();
     }
 
     function toggleAutoDeployConfig() {
@@ -1328,10 +1400,10 @@
       if (!box) return;
       let html = '';
       if (sched.last_run_at) {
-        html += `<div>上次检查: <span class="text-slate-700">${escHtml(sched.last_run_at)}</span></div>`;
+        html += `<div>${t('settings_last_check', {time: escHtml(sched.last_run_at)})}</div>`;
       }
       if (sched.last_expired && sched.last_expired.length) {
-        html += `<div class="text-amber-600">上次触发下发: ${sched.last_expired.map(escHtml).join(', ')}</div>`;
+        html += `<div class="text-amber-600">${escHtml(sched.last_expired.join(', '))}</div>`;
         if (sched.last_results && sched.last_results.length) {
           sched.last_results.forEach(r => {
             const icon = r.success ? '✓' : '✗';
@@ -1340,11 +1412,11 @@
           });
         }
       } else if (sched.last_run_at) {
-        html += `<div class="text-slate-400">上次检查无过期条目</div>`;
+        html += `<div class="text-slate-400">${t('settings_no_expired')}</div>`;
       } else {
-        html += `<div class="text-slate-400">尚未运行</div>`;
+        html += `<div class="text-slate-400">${t('settings_not_run')}</div>`;
       }
-      box.innerHTML = html || '加载中...';
+      box.innerHTML = html || t('loading');
     }
 
     function closeSettings() {
@@ -1373,14 +1445,14 @@
         const d1 = await r1.json();
         const d2 = await r2.json();
         if (d1.success && d2.success) {
-          toast('设置已保存', 'success');
+          toast(t('settings_saved'), 'success');
           closeSettings();
           await refreshAll();
         } else {
-          toast((d1.message || d2.message || '保存失败'), 'error');
+          toast((d1.message || d2.message || t('operation_failed')), 'error');
         }
       } catch (e) {
-        toast('操作失败', 'error');
+        toast(t('operation_failed'), 'error');
       }
     }
 
@@ -1412,7 +1484,6 @@
 
     // ─── 时效工具 ──────────────────────────────────────────────────
 
-    /** 根据 preset select + custom datetime-local input 取出 expire_at 字符串 */
     function getExpireValue(presetId, customId) {
       const preset = document.getElementById(presetId);
       const custom = document.getElementById(customId);
@@ -1422,10 +1493,9 @@
       if (val === 'custom') {
         return (custom && custom.value) ? custom.value : '';
       }
-      return val;  // e.g. "7d", "30d"
+      return val;
     }
 
-    /** 切换自定义日期框的显示 */
     function onExpirePresetChange(selectEl, customId) {
       const customEl = document.getElementById(customId);
       if (!customEl) return;
@@ -1437,10 +1507,9 @@
       }
     }
 
-    /** 计算并渲染有效期 badge */
     function renderExpireBadge(expire_at, small = false) {
       if (!expire_at) {
-        return `<span class="text-xs text-slate-300 ${small ? '' : 'px-1.5 py-0.5'}">永久</span>`;
+        return `<span class="text-xs text-slate-300 ${small ? '' : 'px-1.5 py-0.5'}">${t('permanent')}</span>`;
       }
       const exp = new Date(expire_at.replace(' ', 'T'));
       const now = new Date();
@@ -1449,27 +1518,26 @@
 
       if (diffMs <= 0) {
         return `<span class="text-xs font-medium text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-full">
-          <i class="fas fa-clock-rotate-left mr-0.5"></i>已过期</span>`;
+          <i class="fas fa-clock-rotate-left mr-0.5"></i>${t('expired')}</span>`;
       }
 
       let color, label;
       if (diffDays < 1) {
         const hrs = Math.ceil(diffMs / 3600000);
         color = 'text-red-600 bg-red-50 border-red-200';
-        label = `${hrs}小时后过期`;
+        label = t('hours_left', {n: hrs});
       } else if (diffDays < 7) {
         const d = Math.ceil(diffDays);
         color = 'text-orange-600 bg-orange-50 border-orange-200';
-        label = `${d}天后过期`;
+        label = t('days_left', {n: d});
       } else if (diffDays < 30) {
         const d = Math.ceil(diffDays);
         color = 'text-amber-600 bg-amber-50 border-amber-200';
-        label = `${d}天后过期`;
+        label = t('days_left', {n: d});
       } else {
-        // Show date
-        const dateStr = exp.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric', year: 'numeric' });
+        const dateStr = exp.toLocaleDateString(window.__LANG === 'zh' ? 'zh-CN' : window.__LANG === 'ru' ? 'ru-RU' : 'en-US', { month: 'numeric', day: 'numeric', year: 'numeric' });
         color = 'text-green-600 bg-green-50 border-green-200';
-        label = `至 ${dateStr}`;
+        label = t('until_date', {date: dateStr});
       }
 
       return `<span class="text-xs font-medium ${color} border px-1.5 py-0.5 rounded-full" title="${escHtml(expire_at)}">
@@ -1512,7 +1580,7 @@
         updateReviewBadge();
         renderApplications();
       } catch (e) {
-        toast('加载申请列表失败', 'error');
+        toast(t('load_failed', {msg: ''}), 'error');
       }
     }
 
@@ -1533,15 +1601,30 @@
       ['pending', 'approved', 'rejected', 'self-service'].forEach(s => {
         const btn = document.getElementById('app-filter-' + s);
         if (!btn) return;
+        const labels = {
+          pending: t('review_pending'),
+          approved: t('review_approved'),
+          rejected: t('review_rejected'),
+          'self-service': t('review_self_service'),
+        };
         if (s === status) {
           btn.className = 'px-3 py-1.5 rounded-md text-xs font-medium bg-blue-100 text-blue-700 border border-blue-200 transition-colors';
           if (s === 'self-service') {
-            btn.innerHTML = '<i class="fas fa-rotate text-xs mr-1"></i>自助换 IP 记录 <span id="self-service-count" class="ml-1 opacity-70">' + selfServiceRecords.length + '</span>';
+            btn.innerHTML = '<i class="fas fa-rotate text-xs mr-1"></i>' + labels[s] + ' <span id="self-service-count" class="ml-1 opacity-70">' + selfServiceRecords.length + '</span>';
+          } else {
+            btn.textContent = labels[s];
+            if (s === 'pending') {
+              btn.innerHTML = labels[s] + ' <span id="pending-count" class="ml-1 opacity-70">' + applications.filter(a => a.status === 'pending').length + '</span>';
+            }
           }
         } else {
           btn.className = 'px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors';
           if (s === 'self-service') {
-            btn.innerHTML = '<i class="fas fa-rotate text-xs mr-1"></i>自助换 IP 记录 <span id="self-service-count" class="ml-1 opacity-70">' + selfServiceRecords.length + '</span>';
+            btn.innerHTML = '<i class="fas fa-rotate text-xs mr-1"></i>' + labels[s] + ' <span id="self-service-count" class="ml-1 opacity-70">' + selfServiceRecords.length + '</span>';
+          } else if (s === 'pending') {
+            btn.innerHTML = labels[s] + ' <span id="pending-count" class="ml-1 opacity-70">' + applications.filter(a => a.status === 'pending').length + '</span>';
+          } else {
+            btn.textContent = labels[s];
           }
         }
       });
@@ -1550,21 +1633,17 @@
 
     function renderApplications() {
       const el = document.getElementById('app-list');
-      document.getElementById('pending-count').textContent =
-        applications.filter(a => a.status === 'pending').length;
 
-      // 更新下发按钮状态（仅审核申请，不含自助记录）
       const undeployed = applications.filter(a => a.status === 'approved' && !a.deployed);
       const deployBtn = document.getElementById('review-deploy-btn');
       if (undeployed.length > 0) {
         deployBtn.disabled = false;
-        deployBtn.title = `${undeployed.length} 条申请待下发`;
+        deployBtn.title = undeployed.length + ' ' + t('review_deploy_pending');
       } else {
         deployBtn.disabled = true;
         deployBtn.title = '';
       }
 
-      // 自助换 IP 记录单独渲染（独立数据源，独立模板）
       if (appFilter === 'self-service') {
         renderSelfServiceRecords(el);
         return;
@@ -1572,11 +1651,11 @@
 
       const filtered = applications.filter(a => a.status === appFilter);
       if (!filtered.length) {
-        const labels = { pending: '暂无待审核的申请', approved: '暂无已批准的申请', rejected: '暂无已拒绝的申请' };
+        const labels = { pending: t('review_no_pending'), approved: t('review_no_approved'), rejected: t('review_no_rejected') };
         el.innerHTML = `
           <div class="bg-white rounded-xl border border-slate-200 shadow-sm px-5 py-12 text-center text-slate-400">
             <i class="fas fa-inbox text-3xl block mb-2 opacity-30"></i>
-            ${labels[appFilter] || '暂无申请'}
+            ${labels[appFilter] || t('no_data')}
           </div>`;
         return;
       }
@@ -1588,22 +1667,23 @@
           return s ? (s.name || s.host) : h;
         });
 
-        // 有效期显示
         let expireText;
         if (a.expire_at) {
           expireText = formatExpireLabel(a.expire_at);
         } else if (a.duration && /^\d+[dhm]$/i.test(a.duration)) {
           const m = a.duration.match(/^(\d+)([dhm])$/i);
-          const units = { d: '天', h: '小时', m: '分钟' };
-          expireText = `申请 ${m[1]} ${units[m[2].toLowerCase()]}`;
+          const units = { d: t('days_left', {n: ''}).replace(/\d+\s*/, ''), h: '小时', m: '分钟' };
+          if (window.__LANG !== 'zh') {
+            units.d = 'd'; units.h = 'h'; units.m = 'm';
+          }
+          expireText = m[1] + ' ' + units[m[2].toLowerCase()];
         } else if (a.duration) {
           expireText = formatExpireLabel(a.duration);
         } else {
-          expireText = '永久';
+          expireText = t('permanent');
         }
 
         if (a.status === 'pending') {
-          // 构建服务器勾选列表（默认全选）
           const srvCheckboxes = (a.servers || []).map(h => {
             const s = serverNames.find(s => s.host === h);
             const label = s ? `${s.name || s.host} (${s.host})` : h;
@@ -1613,19 +1693,18 @@
             </label>`;
           }).join('');
 
-          // 审核人可调整有效期（含永久选项）
           const expireAdjust = `
             <div class="flex items-center gap-2">
-              <span class="text-xs text-slate-500 whitespace-nowrap">调整有效期:</span>
+              <span class="text-xs text-slate-500 whitespace-nowrap">${t('review_adjust_expire')}</span>
               <select id="expire-${escAttr(a.id)}" onchange="onExpirePresetChange(this, 'expire-custom-${escAttr(a.id)}')"
                 class="border border-slate-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
-                <option value="" selected>不修改</option>
-                <option value="permanent">永久</option>
-                <option value="1d">1 天</option>
-                <option value="7d">7 天</option>
-                <option value="30d">30 天</option>
-                <option value="90d">90 天</option>
-                <option value="custom">自定义...</option>
+                <option value="" selected data-i18n="review_expire_no_change">不修改</option>
+                <option value="permanent" data-i18n="review_expire_permanent_opt">永久</option>
+                <option value="1d" data-i18n="review_expire_1d">1 天</option>
+                <option value="7d" data-i18n="review_expire_7d">7 天</option>
+                <option value="30d" data-i18n="review_expire_30d">30 天</option>
+                <option value="90d" data-i18n="review_expire_90d">90 天</option>
+                <option value="custom" data-i18n="review_expire_custom">自定义...</option>
               </select>
               <input id="expire-custom-${escAttr(a.id)}" type="datetime-local"
                 class="hidden border border-slate-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -1638,7 +1717,7 @@
                   <div class="flex items-center gap-2 mb-1">
                     <span class="text-base font-semibold text-slate-800">${escHtml(a.name || '—')}</span>
                     <span class="text-sm text-slate-500">(${escHtml(a.employee_id || '—')})</span>
-                    <span class="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-medium">待审核</span>
+                    <span class="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-medium">${t('review_status_pending')}</span>
                   </div>
                   <div class="text-sm text-slate-700 mt-1 flex items-center gap-2">
                     <i class="fas fa-bullseye text-slate-400 text-xs flex-shrink-0"></i>
@@ -1646,15 +1725,15 @@
                     <input id="purpose-edit-${escAttr(a.id)}" type="text" value="${escAttr(a.purpose || '')}"
                       class="hidden border border-slate-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-48">
                     <button onclick="startEditPurpose('${escAttr(a.id)}')" id="edit-btn-${escAttr(a.id)}"
-                      class="flex-shrink-0 text-slate-400 hover:text-blue-600 transition-colors" title="修改备注">
+                      class="flex-shrink-0 text-slate-400 hover:text-blue-600 transition-colors" title="${t('edit')}">
                       <i class="fas fa-pen text-xs"></i>
                     </button>
                     <button onclick="confirmEditPurpose('${escAttr(a.id)}')" id="confirm-btn-${escAttr(a.id)}"
-                      class="hidden flex-shrink-0 text-blue-600 hover:text-blue-800 transition-colors" title="确认修改">
+                      class="hidden flex-shrink-0 text-blue-600 hover:text-blue-800 transition-colors" title="${t('confirm')}">
                       <i class="fas fa-check text-xs"></i>
                     </button>
                     <button onclick="cancelEditPurpose('${escAttr(a.id)}')" id="cancel-btn-${escAttr(a.id)}"
-                      class="hidden flex-shrink-0 text-red-400 hover:text-red-600 transition-colors" title="取消修改">
+                      class="hidden flex-shrink-0 text-red-400 hover:text-red-600 transition-colors" title="${t('cancel')}">
                       <i class="fas fa-xmark text-xs"></i>
                     </button>
                   </div>
@@ -1669,28 +1748,28 @@
                 <div class="flex items-center gap-2 ml-3 flex-shrink-0">
                   <button onclick="reviewApp('${escAttr(a.id)}', 'approve')"
                     class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
-                    <i class="fas fa-check mr-1"></i>批准所选
+                    <i class="fas fa-check mr-1"></i>${t('review_approve_btn')}
                   </button>
                   <button onclick="reviewApp('${escAttr(a.id)}', 'reject')"
                     class="border border-red-200 hover:border-red-300 text-red-600 hover:bg-red-50 px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
-                    <i class="fas fa-xmark mr-1"></i>拒绝
+                    <i class="fas fa-xmark mr-1"></i>${t('review_reject_btn')}
                   </button>
                 </div>
               </div>
               ${expireAdjust}
               <div class="border-t border-slate-100 pt-3 mt-3">
-                <div class="text-xs text-slate-500 mb-1.5">申请的服务器（可取消勾选来部分批准）：</div>
+                <div class="text-xs text-slate-500 mb-1.5">${t('review_servers_label')}</div>
                 <div class="grid grid-cols-2 gap-x-4">${srvCheckboxes}</div>
               </div>
               <div id="app-result-${escAttr(a.id)}" class="hidden mt-3"></div>
             </div>`;
         } else {
-          const statusLabel = a.status === 'approved' ? '已批准' : '已拒绝';
+          const statusLabel = a.status === 'approved' ? t('review_status_approved') : t('review_status_rejected');
           const statusColor = a.status === 'approved'
             ? 'bg-green-100 text-green-700'
             : 'bg-red-100 text-red-700';
           const approvedInfo = a.approved_servers && a.approved_servers.length
-            ? `<div class="text-xs text-slate-400 mt-1">批准服务器: ${a.approved_servers.map(h => {
+            ? `<div class="text-xs text-slate-400 mt-1">${a.approved_servers.map(h => {
                 const s = serverNames.find(s => s.host === h);
                 return escHtml(s ? (s.name || s.host) : h);
               }).join(', ')}</div>`
@@ -1698,8 +1777,8 @@
 
           const deployedTag = a.status === 'approved'
             ? (a.deployed
-                ? '<span class="px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-medium">已下发</span>'
-                : '<span class="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-medium">待下发</span>')
+                ? '<span class="px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-medium">' + t('review_status_deployed') + '</span>'
+                : '<span class="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-medium">' + t('review_status_undeployed') + '</span>')
             : '';
 
           return `
@@ -1722,14 +1801,17 @@
                     <i class="fas fa-globe text-slate-400 mr-1.5"></i>${escHtml(a.ip)}
                     <span class="text-slate-300 ml-2">${escHtml(a.created_at)}</span>
                   </div>
-                  <div class="text-xs text-slate-400 mt-1.5">申请服务器: ${escHtml(requestedServers.join(', '))}</div>
+                  <div class="text-xs text-slate-400 mt-1.5">${escHtml(requestedServers.join(', '))}</div>
                   ${approvedInfo}
-                  ${a.reviewed_at ? `<div class="text-xs text-slate-400 mt-0.5">审核时间: ${escHtml(a.reviewed_at)} · 审核人: ${escHtml(a.reviewed_by || '')}</div>` : ''}
+                  ${a.reviewed_at ? `<div class="text-xs text-slate-400 mt-0.5">${escHtml(a.reviewed_at)} · ${escHtml(a.reviewed_by || '')}</div>` : ''}
                 </div>
               </div>
             </div>`;
         }
       }).join('');
+
+      // 翻译动态内容中的 data-i18n 元素
+      setTimeout(i18nPage, 0);
     }
 
     function renderSelfServiceRecords(el) {
@@ -1737,7 +1819,7 @@
         el.innerHTML = `
           <div class="bg-white rounded-xl border border-slate-200 shadow-sm px-5 py-12 text-center text-slate-400">
             <i class="fas fa-rotate text-3xl block mb-2 opacity-30"></i>
-            暂无自助换 IP 记录
+            ${t('review_no_self_service')}
           </div>`;
         return;
       }
@@ -1745,12 +1827,12 @@
       (CFG.servers || []).forEach(s => { serverDict[s.host] = s; });
 
       el.innerHTML = selfServiceRecords.map(r => {
-        const expireText = r.expire_at ? formatExpireLabel(r.expire_at) : '永久';
+        const expireText = r.expire_at ? formatExpireLabel(r.expire_at) : t('permanent');
         const deployBadge = r.total === 0
-          ? '<span class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-xs font-medium">无需下发</span>'
+          ? '<span class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-xs font-medium">' + t('review_no_deploy_needed') + '</span>'
           : r.all_success
-            ? `<span class="px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-medium">已下发 ${r.success_count}/${r.total}</span>`
-            : `<span class="px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-medium">下发 ${r.success_count}/${r.total} 成功</span>`;
+            ? `<span class="px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-medium">${t('review_status_deployed')} ${r.success_count}/${r.total}</span>`
+            : `<span class="px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-medium">${r.success_count}/${r.total}</span>`;
 
         const srvBadges = (r.deploy_results || []).map(d => {
           const s = serverDict[d.host];
@@ -1769,7 +1851,7 @@
             <div class="flex items-center justify-between mb-3 gap-2">
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="px-1.5 py-0.5 rounded-full bg-teal-100 text-teal-700 text-xs font-medium">
-                  <i class="fas fa-rotate text-xs"></i> 自助换 IP
+                  <i class="fas fa-rotate text-xs"></i> ${t('review_self_service_badge')}
                 </span>
                 ${deployBadge}
               </div>
@@ -1780,8 +1862,8 @@
               <i class="fas fa-arrow-right text-slate-400 text-xs mx-1"></i>
               <span class="text-teal-700">${escHtml(r.new_ip)}</span>
             </div>
-            ${r.description ? `<div class="text-xs text-slate-500 mb-2">备注: ${escHtml(r.description)}</div>` : ''}
-            <div class="text-xs text-slate-500 mb-2">有效期: ${escHtml(expireText)}</div>
+            ${r.description ? `<div class="text-xs text-slate-500 mb-2">${escHtml(r.description)}</div>` : ''}
+            <div class="text-xs text-slate-500 mb-2">${expireText}</div>
             ${srvBadges ? `<div class="mt-2 flex flex-wrap gap-1.5">${srvBadges}</div>` : ''}
           </div>`;
       }).join('');
@@ -1793,11 +1875,10 @@
         const checked = document.querySelectorAll(`.app-${appId}-cb:checked`);
         const servers = Array.from(checked).map(cb => cb.value);
         if (!servers.length) {
-          toast('请至少勾选一台服务器', 'warn');
+          toast(t('review_select_server'), 'warn');
           return;
         }
         body.servers = servers;
-        // 收集有效期调整
         const expirePreset = document.getElementById('expire-' + appId);
         const expireCustom = document.getElementById('expire-custom-' + appId);
         if (expirePreset && expirePreset.value) {
@@ -1809,13 +1890,12 @@
             body.expire_at = expirePreset.value;
           }
         }
-        // 收集备注修改
         const purposeEdit = document.getElementById('purpose-edit-' + appId);
         if (purposeEdit) {
           body.description = purposeEdit.value;
         }
       } else {
-        if (!confirm('确认拒绝该申请？')) return;
+        if (!confirm(t('review_confirm_reject'))) return;
       }
 
       try {
@@ -1833,7 +1913,7 @@
           toast(data.message, 'error');
         }
       } catch (e) {
-        toast('操作失败', 'error');
+        toast(t('operation_failed'), 'error');
       }
     }
 
@@ -1885,7 +1965,7 @@
     async function deployApproved() {
       const btn = document.getElementById('review-deploy-btn');
       btn.disabled = true;
-      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> 下发中...';
+      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> ' + t('review_deploy_pending') + '...';
 
       try {
         const res = await fetch('/api/applications/deploy', {
@@ -1894,41 +1974,39 @@
         });
         const data = await res.json();
 
-        // 显示下发日志
         if (data.deploy_result) {
           document.getElementById('review-output-log').textContent = data.deploy_result;
           document.getElementById('review-output-wrap').classList.remove('hidden');
         }
         if (data.success) {
-          toast(`下发成功: ${data.success_count}/${data.total} 台`, 'success');
+          toast(t('review_deploy_success', {success: data.success_count, total: data.total}), 'success');
         } else {
           const failed = (data.results || []).filter(r => !r.success).map(r => r.server).join(', ');
-          const extra = failed ? ` 失败: ${failed}` : '';
+          const extra = failed ? ' ' + failed : '';
           toast(data.message + extra, 'error');
         }
         await loadApplications();
         await refreshAll();
       } catch (e) {
-        toast('下发失败: ' + e.message, 'error');
+        toast(t('request_failed', {msg: e.message}), 'error');
       } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-paper-plane"></i> 下发待部署';
-        // 重新判断按钮状态
+        btn.innerHTML = '<i class="fas fa-paper-plane"></i> ' + t('review_deploy_pending');
         renderApplications();
       }
     }
 
     function formatExpireLabel(expire_at) {
-      if (!expire_at) return '永久';
+      if (!expire_at) return t('permanent');
       try {
         const exp = new Date(expire_at.replace(' ', 'T'));
         const now = new Date();
         const diffMs = exp - now;
         const diffDays = diffMs / 86400000;
-        if (diffMs <= 0) return '已过期';
-        if (diffDays < 1) return `${Math.ceil(diffMs / 3600000)} 小时`;
-        if (diffDays < 30) return `${Math.ceil(diffDays)} 天`;
-        return `${Math.round(diffDays)} 天`;
+        if (diffMs <= 0) return t('expired');
+        if (diffDays < 1) return Math.ceil(diffMs / 3600000) + 'h';
+        if (diffDays < 30) return Math.ceil(diffDays) + 'd';
+        return Math.round(diffDays) + 'd';
       } catch (e) { return expire_at; }
     }
 
@@ -1944,7 +2022,7 @@
     // ─── 认证 ──────────────────────────────────────────────────────
 
     async function doLogout() {
-      if (!confirm('确认退出登录？')) return;
+      if (!confirm(t('logout_confirm'))) return;
       await fetch('/api/logout', { method: 'POST' });
       window.location.href = '/login';
     }
@@ -1953,6 +2031,7 @@
       ['cp-old', 'cp-new', 'cp-confirm'].forEach(id => document.getElementById(id).value = '');
       document.getElementById('cp-err').classList.add('hidden');
       document.getElementById('change-pwd-modal').classList.remove('hidden');
+      i18nPage();
       setTimeout(() => document.getElementById('cp-old').focus(), 50);
     }
 
@@ -1967,17 +2046,17 @@
       const errEl = document.getElementById('cp-err');
 
       if (!old_password || !new_password) {
-        errEl.textContent = '请填写所有字段';
+        errEl.textContent = t('change_pwd_fill_all');
         errEl.classList.remove('hidden');
         return;
       }
       if (new_password !== confirm_password) {
-        errEl.textContent = '两次输入的新密码不一致';
+        errEl.textContent = t('change_pwd_mismatch');
         errEl.classList.remove('hidden');
         return;
       }
       if (new_password.length < 6) {
-        errEl.textContent = '新密码至少 6 位';
+        errEl.textContent = t('change_pwd_too_short');
         errEl.classList.remove('hidden');
         return;
       }
@@ -1991,19 +2070,21 @@
         const data = await res.json();
         if (data.success) {
           closeChangePwdModal();
-          toast('密码已更新', 'success');
+          toast(t('change_pwd_updated'), 'success');
         } else {
-          errEl.textContent = data.message;
+          errEl.textContent = data.message || t('change_pwd_old_wrong');
           errEl.classList.remove('hidden');
         }
       } catch (e) {
-        errEl.textContent = '请求失败: ' + e.message;
+        errEl.textContent = t('request_failed', {msg: e.message});
         errEl.classList.remove('hidden');
       }
     }
 
     // ─── 初始化 ────────────────────────────────────────────────────
 
+    // 翻译 title
+    i18nPage();
     refreshAll();
   </script>
 </body>

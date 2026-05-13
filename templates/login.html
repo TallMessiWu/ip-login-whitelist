@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{{ lang }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>登录 · SSH IP 白名单</title>
+  <title data-i18n="login_title">登录 · SSH IP 白名单</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <style>
@@ -13,14 +13,37 @@
 </head>
 <body class="bg-slate-50 min-h-screen flex items-center justify-center p-4">
 
+  <!-- 语言切换 -->
+  <div class="fixed top-4 right-4 z-50">
+    <div class="relative" id="lang-dropdown">
+      <button onclick="toggleLangMenu()"
+        class="flex items-center gap-1.5 bg-white border border-slate-200 hover:border-slate-300 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-800 shadow-sm transition-colors">
+        <i class="fas fa-globe text-slate-400"></i>
+        <span id="current-lang-label">{{ lang.upper() }}</span>
+        <i class="fas fa-chevron-down text-slate-400 text-[10px]"></i>
+      </button>
+      <div id="lang-menu" class="hidden absolute right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg py-1 w-28 z-50">
+        <button onclick="switchLang('zh')" class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center justify-between">
+          中文 <span class="text-slate-300 text-[10px]">{{ '✓' if lang == 'zh' else '' }}</span>
+        </button>
+        <button onclick="switchLang('ru')" class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center justify-between">
+          Русский <span class="text-slate-300 text-[10px]">{{ '✓' if lang == 'ru' else '' }}</span>
+        </button>
+        <button onclick="switchLang('en')" class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center justify-between">
+          English <span class="text-slate-300 text-[10px]">{{ '✓' if lang == 'en' else '' }}</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div class="w-full max-w-sm fade-in">
     <!-- Logo -->
     <div class="flex flex-col items-center mb-8">
       <div class="w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center shadow-lg mb-3">
         <i class="fas fa-shield-halved text-white text-2xl"></i>
       </div>
-      <h1 class="text-xl font-bold text-slate-800">SSH IP 白名单</h1>
-      <p class="text-sm text-slate-400 mt-1">请登录以继续</p>
+      <h1 class="text-xl font-bold text-slate-800" data-i18n="login_heading">SSH IP 白名单</h1>
+      <p class="text-sm text-slate-400 mt-1" data-i18n="login_subtitle">请登录以继续</p>
     </div>
 
     <!-- 登录卡片 -->
@@ -31,13 +54,13 @@
 
       <div class="space-y-4">
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1.5">用户名</label>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5" data-i18n="login_username">用户名</label>
           <input id="username" type="text" placeholder="admin" autocomplete="username"
             class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
             onkeydown="if(event.key==='Enter')document.getElementById('password').focus()">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1.5">密码</label>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5" data-i18n="login_password">密码</label>
           <div class="relative">
             <input id="password" type="password" placeholder="••••••••" autocomplete="current-password"
               class="w-full border border-slate-300 rounded-lg px-3 py-2.5 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
@@ -53,30 +76,74 @@
       <button id="login-btn" onclick="doLogin()"
         class="mt-5 w-full bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
         <i class="fas fa-arrow-right-to-bracket"></i>
-        登录
+        <span data-i18n="login_button">登录</span>
       </button>
 
       <div class="mt-3 flex items-center gap-3">
         <div class="flex-1 border-t border-slate-200"></div>
-        <span class="text-xs text-slate-400">或</span>
+        <span class="text-xs text-slate-400" data-i18n="or">或</span>
         <div class="flex-1 border-t border-slate-200"></div>
       </div>
 
       <a href="/guest"
         class="mt-3 w-full border border-slate-300 hover:border-slate-400 text-slate-600 hover:text-slate-800 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2 bg-white">
         <i class="fas fa-user"></i>
-        Guest 自助换 IP
+        <span data-i18n="login_guest_link">Guest 自助换 IP</span>
       </a>
 
       <a href="/apply"
         class="mt-3 w-full border border-blue-300 hover:border-blue-400 text-blue-600 hover:text-blue-800 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2 bg-blue-50">
         <i class="fas fa-file-signature"></i>
-        申请加入白名单
+        <span data-i18n="login_apply_link">申请加入白名单</span>
       </a>
     </div>
   </div>
 
   <script>
+    // ── i18n 注入 ──────────────────────────────────────────────────
+    window.__LANG = '{{ lang }}';
+    window.__I18N = {{ T | tojson }};
+
+    function t(key, params) {
+      let s = window.__I18N[key] || key;
+      if (params) {
+        Object.keys(params).forEach(function(k) { s = s.replace('{' + k + '}', params[k]); });
+      }
+      return s;
+    }
+
+    // 页面加载时翻译所有 [data-i18n] 元素
+    document.querySelectorAll('[data-i18n]').forEach(function(el) {
+      var key = el.getAttribute('data-i18n');
+      if (key) el.textContent = t(key);
+    });
+    // 翻译 title
+    var titleEl = document.querySelector('title[data-i18n]');
+    if (titleEl) document.title = t(titleEl.getAttribute('data-i18n'));
+
+    // ── 语言切换 ──────────────────────────────────────────────────
+    function toggleLangMenu() {
+      document.getElementById('lang-menu').classList.toggle('hidden');
+    }
+    async function switchLang(lang) {
+      try {
+        await fetch('/api/lang', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lang: lang }),
+        });
+        window.location.reload();
+      } catch(e) { window.location.reload(); }
+    }
+    // 点击外部关闭下拉
+    document.addEventListener('click', function(e) {
+      var dd = document.getElementById('lang-dropdown');
+      if (dd && !dd.contains(e.target)) {
+        document.getElementById('lang-menu').classList.add('hidden');
+      }
+    });
+
+    // ── 登录逻辑 ──────────────────────────────────────────────────
     document.getElementById('username').focus();
 
     function togglePwd() {
@@ -97,12 +164,12 @@
       const password = document.getElementById('password').value;
 
       if (!username || !password) {
-        showErr('请输入用户名和密码');
+        showErr(t('login_fill_fields'));
         return;
       }
 
       btn.disabled = true;
-      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> 登录中...';
+      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> ' + t('login_logging_in');
       hideErr();
 
       try {
@@ -115,13 +182,13 @@
         if (data.success) {
           window.location.href = '/';
         } else {
-          showErr(data.message || '登录失败');
+          showErr(data.message || t('login_failed'));
         }
       } catch (e) {
-        showErr('网络错误，请重试');
+        showErr(t('network_error'));
       } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-arrow-right-to-bracket"></i> 登录';
+        btn.innerHTML = '<i class="fas fa-arrow-right-to-bracket"></i> ' + t('login_button');
       }
     }
 

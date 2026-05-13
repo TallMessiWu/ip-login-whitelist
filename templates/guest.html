@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{{ lang }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Guest 自助换 IP · SSH IP 白名单</title>
+  <title data-i18n="guest_title">Guest 自助换 IP · SSH IP 白名单</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <style>
@@ -16,14 +16,37 @@
 </head>
 <body class="bg-slate-50 min-h-screen flex items-center justify-center p-4">
 
+  <!-- 语言切换 -->
+  <div class="fixed top-4 right-4 z-50">
+    <div class="relative" id="lang-dropdown">
+      <button onclick="toggleLangMenu()"
+        class="flex items-center gap-1.5 bg-white border border-slate-200 hover:border-slate-300 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-800 shadow-sm transition-colors">
+        <i class="fas fa-globe text-slate-400"></i>
+        <span id="current-lang-label">{{ lang.upper() }}</span>
+        <i class="fas fa-chevron-down text-slate-400 text-[10px]"></i>
+      </button>
+      <div id="lang-menu" class="hidden absolute right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg py-1 w-28 z-50">
+        <button onclick="switchLang('zh')" class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center justify-between">
+          中文 <span class="text-slate-300 text-[10px]">{{ '✓' if lang == 'zh' else '' }}</span>
+        </button>
+        <button onclick="switchLang('ru')" class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center justify-between">
+          Русский <span class="text-slate-300 text-[10px]">{{ '✓' if lang == 'ru' else '' }}</span>
+        </button>
+        <button onclick="switchLang('en')" class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center justify-between">
+          English <span class="text-slate-300 text-[10px]">{{ '✓' if lang == 'en' else '' }}</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div class="w-full max-w-sm fade-in">
     <!-- Logo -->
     <div class="flex flex-col items-center mb-8">
       <div class="w-14 h-14 bg-teal-600 rounded-2xl flex items-center justify-center shadow-lg mb-3">
         <i class="fas fa-user text-white text-2xl"></i>
       </div>
-      <h1 class="text-xl font-bold text-slate-800">Guest 自助换 IP</h1>
-      <p class="text-sm text-slate-400 mt-1">将自己旧的 IP 替换为新 IP</p>
+      <h1 class="text-xl font-bold text-slate-800" data-i18n="guest_heading">Guest 自助换 IP</h1>
+      <p class="text-sm text-slate-400 mt-1" data-i18n="guest_subtitle">将自己旧的 IP 替换为新 IP</p>
     </div>
 
     <!-- 表单卡片 -->
@@ -37,14 +60,14 @@
 
       <div class="space-y-4">
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1.5">旧 IP / CIDR</label>
-          <input id="old-ip" type="text" placeholder="例如 192.168.1.100"
+          <label class="block text-xs font-medium text-slate-600 mb-1.5" data-i18n="guest_old_ip">旧 IP / CIDR</label>
+          <input id="old-ip" type="text" placeholder="192.168.1.100"
             class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition"
             onkeydown="if(event.key==='Enter')document.getElementById('new-ip').focus()">
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-600 mb-1.5">新 IP / CIDR</label>
-          <input id="new-ip" type="text" placeholder="例如 10.0.0.1"
+          <label class="block text-xs font-medium text-slate-600 mb-1.5" data-i18n="guest_new_ip">新 IP / CIDR</label>
+          <input id="new-ip" type="text" placeholder="10.0.0.1"
             class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition"
             onkeydown="if(event.key==='Enter')doReplace()">
         </div>
@@ -53,7 +76,7 @@
       <button id="submit-btn" onclick="doReplace()"
         class="mt-5 w-full bg-teal-600 hover:bg-teal-700 text-white py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
         <i class="fas fa-rotate"></i>
-        替换并下发
+        <span data-i18n="guest_replace_button">替换并下发</span>
       </button>
 
       <!-- 结果输出 -->
@@ -65,13 +88,54 @@
 
       <div class="mt-4 text-center">
         <a href="/login" class="text-xs text-slate-400 hover:text-slate-600 transition-colors">
-          <i class="fas fa-arrow-left mr-1"></i>返回登录
+          <i class="fas fa-arrow-left mr-1"></i><span data-i18n="guest_back_to_login">返回登录</span>
         </a>
       </div>
     </div>
   </div>
 
   <script>
+    // ── i18n 注入 ──────────────────────────────────────────────────
+    window.__LANG = '{{ lang }}';
+    window.__I18N = {{ T | tojson }};
+
+    function t(key, params) {
+      let s = window.__I18N[key] || key;
+      if (params) {
+        Object.keys(params).forEach(function(k) { s = s.replace('{' + k + '}', params[k]); });
+      }
+      return s;
+    }
+
+    document.querySelectorAll('[data-i18n]').forEach(function(el) {
+      var key = el.getAttribute('data-i18n');
+      if (key) el.textContent = t(key);
+    });
+    var titleEl = document.querySelector('title[data-i18n]');
+    if (titleEl) document.title = t(titleEl.getAttribute('data-i18n'));
+
+    // ── 语言切换 ──────────────────────────────────────────────────
+    function toggleLangMenu() {
+      document.getElementById('lang-menu').classList.toggle('hidden');
+    }
+    async function switchLang(lang) {
+      try {
+        await fetch('/api/lang', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lang: lang }),
+        });
+        window.location.reload();
+      } catch(e) { window.location.reload(); }
+    }
+    document.addEventListener('click', function(e) {
+      var dd = document.getElementById('lang-dropdown');
+      if (dd && !dd.contains(e.target)) {
+        document.getElementById('lang-menu').classList.add('hidden');
+      }
+    });
+
+    // ── 替换逻辑 ──────────────────────────────────────────────────
     document.getElementById('old-ip').focus();
 
     async function doReplace() {
@@ -84,17 +148,17 @@
       document.getElementById('output-wrap').classList.add('hidden');
 
       if (!oldIp || !newIp) {
-        showErr('请填写旧 IP 和新 IP');
+        showErr(t('guest_fill_both'));
         return;
       }
 
       if (oldIp === newIp) {
-        showErr('新旧 IP 相同，无需替换');
+        showErr(t('guest_same_ip'));
         return;
       }
 
       btn.disabled = true;
-      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> 处理中...';
+      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> ' + t('guest_processing');
 
       try {
         const res = await fetch('/api/guest/replace', {
@@ -110,16 +174,16 @@
             showOutput(data.deploy_result);
           }
         } else {
-          showErr(data.message || '替换失败');
+          showErr(data.message || t('guest_replace_failed'));
           if (data.deploy_result) {
             showOutput(data.deploy_result);
           }
         }
       } catch (e) {
-        showErr('网络错误，请重试');
+        showErr(t('network_error'));
       } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-rotate"></i> 替换并下发';
+        btn.innerHTML = '<i class="fas fa-rotate"></i> ' + t('guest_replace_button');
       }
     }
 
