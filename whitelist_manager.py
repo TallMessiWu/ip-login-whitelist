@@ -475,7 +475,7 @@ if [ "$USE_FIREWALLD" = "true" ]; then
     while IFS= read -r old_rule; do
         [ -z "$old_rule" ] && continue
         firewall-cmd --permanent --remove-rich-rule="$old_rule" &>/dev/null || true
-    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep -E "port[ =]+['\"]?$SSH_PORT\b")
+    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep -E "port[ =]+[\\"\\']?$SSH_PORT\\b")
 
     if [ "$AUDIT" = "true" ]; then
         # 审计模式：保留 ssh service 开放（不拦截），仅添加全流量日志规则
@@ -671,7 +671,7 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
     while IFS= read -r rule; do
         [ -z "$rule" ] && continue
         firewall-cmd --permanent --remove-rich-rule="$rule" && echo "[OK] 已移除: $rule"
-    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep -E "port[ =]+['\"]?{ssh_port}\b")
+    done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep -E "port[ =]+[\\"\\']?{ssh_port}\\b")
     # 恢复默认 ssh service 开放
     firewall-cmd --permanent --add-service=ssh
     firewall-cmd --reload
