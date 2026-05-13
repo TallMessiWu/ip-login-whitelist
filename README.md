@@ -58,6 +58,7 @@ python web_app.py --host 127.0.0.1    # 仅本地访问（输出只剩一行 URL
 - **自助申请白名单**：无需登录，在线提交申请（IP、姓名、工号、用途、时长、目标服务器）
 - **审核审批**：管理员审核申请（批准/拒绝，可部分服务器批准），批准后自动写入白名单
 - **过期自动下发调度器**：后台定时扫描过期条目并自动清除 + 重下发，间隔可配置
+- **多语言支持**：中文 / 俄语 / English 三语界面，首次访问自动检测浏览器语言，右上角可手动切换
 
 > 服务器认证（密钥/密码）也可通过 CLI `server add` 配置。
 
@@ -321,6 +322,7 @@ Web 后台可选启用的定时任务：
 ```
 whitelist_manager.py        # CLI 全部功能 + Web 依赖的核心函数库，单文件 ~1300 行
 web_app.py                  # Web 管理界面后端（Flask），REST API + 认证 + 后台调度器
+translations.py             # 三语翻译字典（中文/俄语/英文），含语言检测函数
 templates/index.html        # Web 管理主界面（白名单/服务器/下发/设置/审核/调度器）
 templates/login.html        # Web 登录页面
 templates/guest.html        # Guest 自助换 IP 页面（无需登录）

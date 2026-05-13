@@ -12,6 +12,7 @@
 | `templates/login.html` | Web 登录页 |
 | `templates/guest.html` | Guest 自助换 IP（无需登录） |
 | `templates/apply.html` | 自助申请白名单（无需登录） |
+| `translations.py` | 三语翻译字典（zh/ru/en），含 Accept-Language 语言检测函数 |
 | `tests/test_whitelist.py` | pytest 测试套件，覆盖 CLI + Web 双侧，~1600 行 / 60+ 测试类 |
 | `pyproject.toml` / `uv.lock` | uv 项目配置，Python ≥3.11，flask ≥3.1.3 |
 | `requirements.txt` | `flask>=3.0.0`（paramiko 可选；兼容 pip 安装） |
@@ -47,6 +48,7 @@
 - **安全自检**：`deploy` 和 Web 下发前自动检测本机出口 IP 是否在白名单中
 - **认证**：Web 端 PBKDF2-HMAC-SHA256 密码哈希（200k 迭代，兼容旧 SHA-256 哈希），session 鉴权，登录速率限制（每 IP 60 秒 ≤10 次），公开路径白名单（`/login`、`/guest`、`/apply`）
 - **CSRF 防护**：所有状态变更请求（POST/PUT/PATCH/DELETE）必须携带 `X-CSRF-Token` 头，前端通过包装 `window.fetch` 自动注入；session cookie 设置 HttpOnly + SameSite=Lax
+- **国际化**：首次访问根据 `Accept-Language` 自动检测语言（中文 → 俄语 → 英文，无法检测默认中文），session 存储偏好；每页右上角语言切换按钮；`translations.py` 236 键三语字典，模板上下文注入 `lang`/`T`，前端 `t(key)` + `data-i18n` 属性翻译
 - **后台调度器**：可选启用的定时扫描 → 过期清除 → 自动重下发，间隔可配（默认 5 分钟）
 
 ## 配置文件结构
@@ -83,4 +85,4 @@ uv run pytest                # 运行测试
 
 ## 代码提交
 
-每次提交前更新 @CLAUDE.md 文件（及子模块引用文件）。代码提交时必须使用 gitmoji-commit 这个 skill。
+每次提交前自主判断是否需要更新 CLAUDE.md（及子模块引用文件 CLAUDE-CLI.md、CLAUDE-WEB.md）和 README.md。功能变更、文件增删、架构调整、API 增减时均需同步更新文档。代码提交时必须使用 gitmoji-commit 这个 skill。

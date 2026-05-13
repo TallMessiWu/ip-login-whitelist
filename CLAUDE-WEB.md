@@ -108,7 +108,19 @@
 | `templates/guest.html` | Guest 自助换 IP 界面（旧 IP → 新 IP，自动替换并下发） |
 | `templates/apply.html` | 自助申请表单（IP、姓名、工号、目的、时长、目标服务器） |
 
-## 十、Web 入口
+## 十、国际化（i18n）
+
+| 功能 | 位置 | 行号 |
+|---|---|---|
+| 翻译字典模块 | `translations.py` | 全文 |
+| 语言检测（Accept-Language） | `detect_language()` | translations.py 末 |
+| 语言注入模板（context processor） | `inject_i18n()` | web_app.py L152 |
+| 语言切换 API | `GET/PATCH /api/lang` → `api_lang()` | web_app.py L186 |
+| session 中存储语言 | `before_request` → `session["lang"]` | web_app.py L108 |
+
+逻辑：首次访问从 `Accept-Language` 检测（zh → ru → en → 默认 zh），存入 session。`/api/lang` PATCH 可手动切换。模板上下文处理器注入 `lang`（语言代码）和 `T`（当前语言完整翻译字典）。前端 `window.__I18N` + `t(key, params)` 查找翻译，`data-i18n` 属性自动翻译静态文本。
+
+## 十一、Web 入口
 
 | 功能 | 行号 |
 |---|---|
