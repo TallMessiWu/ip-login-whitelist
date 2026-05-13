@@ -1508,10 +1508,15 @@ class TestWebGuestReplace:
         entry = next(e for e in saved["whitelist"] if e["ip"] == "10.2.2.2")
         assert entry["description"] == "alice-laptop"
         assert entry["expire_at"] == "2030-12-31 23:59:59"
-        # 审计申请记录也应携带原 expire_at 与备注
-        app = next(a for a in saved["applications"] if a["type"] == "replace")
-        assert app["expire_at"] == "2030-12-31 23:59:59"
-        assert "alice-laptop" in app["purpose"]
+        # 自助换 IP 记录写入独立的 self_service_log，不混入 applications
+        assert "applications" not in saved or all(
+            a.get("type") != "replace" for a in saved.get("applications", [])
+        )
+        record = saved["self_service_log"][-1]
+        assert record["old_ip"] == "10.1.1.1"
+        assert record["new_ip"] == "10.2.2.2"
+        assert record["description"] == "alice-laptop"
+        assert record["expire_at"] == "2030-12-31 23:59:59"
 
 
 # ── /api/config ──────────────────────────────────────────────────────────

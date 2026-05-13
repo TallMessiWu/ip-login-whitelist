@@ -23,8 +23,11 @@
 |---|---|---|
 | Guest 页面 | `/guest` → `guest_page()` | L188 |
 | 替换 IP 并立即下发（无需审核） | `POST /api/guest/replace` → `api_guest_replace()` | L253 |
+| 自助记录列表（管理员） | `GET /api/self-service-log` → `api_self_service_log()` | L470 |
 
-逻辑：原地更新（保留 description/expire_at 等元数据，仅刷新 added_at/added_by="guest-self-service"），同步全局白名单与所有服务器专属白名单中匹配的旧 IP，立即下发到受影响的服务器，返回 `deploy_result` 给前端实时显示。无需管理员审核；隐式凭证 = 旧 IP 必须已在白名单中。审计条目以 `status="approved"` + `reviewed_by="self-service"` 记录到 `applications`。
+逻辑：原地更新（保留 description/expire_at 等元数据，仅刷新 added_at/added_by="guest-self-service"），同步全局白名单与所有服务器专属白名单中匹配的旧 IP，立即下发到受影响的服务器，返回 `deploy_result` 给前端实时显示。无需管理员审核；隐式凭证 = 旧 IP 必须已在白名单中。
+
+**存储分离**：自助替换记录写入独立的 `cfg["self_service_log"]`（不进 `applications`），避免被审核/批量下发流程误处理。记录字段：`id / old_ip / new_ip / description / expire_at / servers / deploy_results / success_count / total / all_success / created_at`。审核页通过"自助换 IP"筛选标签独立展示。
 
 ## 三、自助申请白名单（L274-513）
 

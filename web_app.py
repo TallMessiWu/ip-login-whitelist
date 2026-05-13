@@ -312,31 +312,6 @@ def api_guest_replace():
     # 立即持久化白名单变更
     save_config(cfg)
 
-    # 记录审计条目（自动批准，待下发结果；保留原条目的 expire_at / description）
-    app_id = now.strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(4)
-    purpose_parts = [f"自助替换: {old_ip} → {new_ip}"]
-    if original_description:
-        purpose_parts.append(f"（原备注: {original_description}）")
-    application = {
-        "id": app_id,
-        "type": "replace",
-        "ip": new_ip,
-        "old_ip": old_ip,
-        "name": "Guest",
-        "employee_id": "",
-        "purpose": "".join(purpose_parts),
-        "duration": "",
-        "expire_at": original_expire_at,
-        "servers": [s["host"] for s in servers_to_deploy],
-        "status": "approved",
-        "approved_servers": [s["host"] for s in servers_to_deploy],
-        "deployed": False,
-        "created_at": now_str,
-        "reviewed_at": now_str,
-        "reviewed_by": "self-service",
-    }
-    cfg.setdefault("applications", []).append(application)
-
     # 立即下发到受影响的服务器
     ssh_port = cfg["settings"].get("ssh_port", 22)
     persist = cfg["settings"].get("persist_rules", True)
@@ -365,7 +340,25 @@ def api_guest_replace():
             "output": output,
         })
 
-    application["deployed"] = (success_count == len(results) and success_count > 0)
+    # 记录到独立的自助替换日志（不混入 applications，避免被审核/批量下发流程误处理）
+    record_id = now.strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(4)
+    record = {
+        "id": record_id,
+        "old_ip": old_ip,
+        "new_ip": new_ip,
+        "description": original_description,
+        "expire_at": original_expire_at,
+        "servers": [s["host"] for s in servers_to_deploy],
+        "deploy_results": [
+            {"host": r["host"], "server": r["server"], "success": r["success"]}
+            for r in results
+        ],
+        "success_count": success_count,
+        "total": len(results),
+        "all_success": len(results) == 0 or success_count == len(results),
+        "created_at": now_str,
+    }
+    cfg.setdefault("self_service_log", []).append(record)
     save_config(cfg)
 
     deploy_log = ""
@@ -385,7 +378,7 @@ def api_guest_replace():
             f"已替换 {old_ip} → {new_ip}，下发 {success_count}/{total} 台成功"
             if total > 0 else f"已替换 {old_ip} → {new_ip}（无需下发的服务器）"
         ),
-        "id": app_id,
+        "id": record_id,
         "deploy_result": deploy_log if total > 0 else "",
     })
 
@@ -464,6 +457,15 @@ def api_applications_list():
     cfg = load_config(purge=False)
     apps = cfg.get("applications", [])
     return jsonify({"success": True, "applications": apps})
+
+
+@app.route("/api/self-service-log", methods=["GET"])
+def api_self_service_log():
+    """获取 Guest 自助换 IP 历史记录（最新优先）。"""
+    cfg = load_config(purge=False)
+    records = list(cfg.get("self_service_log", []))
+    records.reverse()
+    return jsonify({"success": True, "records": records})
 
 
 @app.route("/api/applications/<app_id>/review", methods=["POST"])
