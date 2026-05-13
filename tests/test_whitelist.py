@@ -627,8 +627,9 @@ class TestGenerateApplyScript:
         script = wm.generate_apply_script(whitelist, 22, True, audit=True)
         assert "AUDIT=true" in script
         assert "审计模式" in script
-        # 审计模式不应包含 DROP 规则
-        assert "iptables -A \"$CHAIN\" -j DROP" not in script
+        # 审计模式 iptables 路径应使用 LOG + ACCEPT，不直接 DROP
+        assert 'iptables -A "$CHAIN" -j LOG' in script
+        assert 'iptables -A "$CHAIN" -j ACCEPT' in script
 
     def test_production_mode(self):
         """生产模式（非审计）必须包含 DROP 规则。"""
@@ -975,28 +976,23 @@ def logged_in_client(web_client, sample_config):
 # ── 密码哈希函数测试（独立单元） ─────────────────────────────────────────
 
 class TestHashPassword:
-    def test_hash_returns_sha256_format(self):
+    def test_hash_returns_pbkdf2_format(self):
         h = web_app._hash_password("test")
-        assert h.startswith("sha256:")
-        parts = h.split(":", 2)
-        assert len(parts) == 3
-        assert len(parts[1]) == 32  # 16 bytes hex salt
+        assert h.startswith("pbkdf2:")
+        parts = h.split(":", 3)
+        assert len(parts) == 4
+        assert int(parts[1]) == 200_000
+        assert len(parts[2]) == 32  # 16 bytes hex salt
+        assert len(parts[3]) == 64  # 32 bytes PBKDF2 output
 
-    def test_hash_with_explicit_salt(self):
-        salt = "abcd1234abcd1234abcd1234abcd1234"
-        h = web_app._hash_password("mypass", salt)
-        assert h.startswith(f"sha256:{salt}:")
-
-    def test_hash_deterministic_with_salt(self):
-        salt = "fixed_salt_1234567890abcdef"
-        h1 = web_app._hash_password("pwd", salt)
-        h2 = web_app._hash_password("pwd", salt)
-        assert h1 == h2
+    def test_hash_is_unique_each_call(self):
+        h1 = web_app._hash_password("same_password")
+        h2 = web_app._hash_password("same_password")
+        assert h1 != h2  # 随机盐确保每次结果不同
 
     def test_hash_different_passwords_differ(self):
-        salt = "fixed_salt_1234567890abcdef"
-        h1 = web_app._hash_password("pwd1", salt)
-        h2 = web_app._hash_password("pwd2", salt)
+        h1 = web_app._hash_password("pwd1")
+        h2 = web_app._hash_password("pwd2")
         assert h1 != h2
 
 
