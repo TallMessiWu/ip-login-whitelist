@@ -17,14 +17,14 @@
 
 公开路径（无需登录）：`/login`、`/guest`、`/apply` 及对应的 `/api/*` 路由 + `/api/servers-public`、`/api/check-my-ip`。
 
-## 二、Guest 自助换 IP（L172-270）
+## 二、Guest 自助换 IP（L187-380）
 
 | 功能 | 路由 | 行号 |
 |---|---|---|
-| Guest 页面 | `/guest` → `guest_page()` | L126 |
-| 替换 IP 并自动下发 | `POST /api/guest/replace` → `api_guest_replace()` | L172 |
+| Guest 页面 | `/guest` → `guest_page()` | L188 |
+| 替换 IP 并立即下发（无需审核） | `POST /api/guest/replace` → `api_guest_replace()` | L253 |
 
-逻辑：搜索全局白名单 + 所有服务器专属白名单，将 old_ip 全部替换为 new_ip，然后自动下发到所有服务器。
+逻辑：原地更新（保留 description/expire_at 等元数据，仅刷新 added_at/added_by="guest-self-service"），同步全局白名单与所有服务器专属白名单中匹配的旧 IP，立即下发到受影响的服务器，返回 `deploy_result` 给前端实时显示。无需管理员审核；隐式凭证 = 旧 IP 必须已在白名单中。审计条目以 `status="approved"` + `reviewed_by="self-service"` 记录到 `applications`。
 
 ## 三、自助申请白名单（L274-513）
 

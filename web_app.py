@@ -251,7 +251,10 @@ def api_logout():
 
 @public_route("/api/guest/replace", methods=["POST"])
 def api_guest_replace():
-    """Guest 自助替换 IP：提交替换申请，需管理员审核后执行。"""
+    """Guest 自助替换 IP：原地更新旧 IP 为新 IP 并立即下发到受影响的服务器。
+
+    隐式凭证 = 旧 IP 必须已存在于白名单。无需管理员审核，下发结果直接返回。
+    """
     data = request.json or {}
     old_ip = (data.get("old_ip") or "").strip()
     new_ip = (data.get("new_ip") or "").strip()
@@ -266,29 +269,44 @@ def api_guest_replace():
         return jsonify({"success": False, "message": "新旧 IP 相同，无需替换"}), 400
 
     cfg = load_config()
+    now = datetime.datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 搜索旧 IP 所在位置，构建影响的服务器列表
-    affected_servers = []
+    # 原地更新旧 IP → 新 IP，保留 description / expire_at 等元数据；
+    # 仅刷新 added_at 和 added_by 以保留审计痕迹。
     found_global = False
+    affected_server_hosts: list[str] = []
 
     for entry in cfg.get("whitelist", []):
         if entry["ip"] == old_ip:
+            entry["ip"] = new_ip
+            entry["added_at"] = now_str
+            entry["added_by"] = "guest-self-service"
             found_global = True
             break
 
     for srv in cfg.get("servers", []):
         for entry in srv.get("whitelist", []):
             if entry["ip"] == old_ip:
-                affected_servers.append(srv["host"])
+                entry["ip"] = new_ip
+                entry["added_at"] = now_str
+                entry["added_by"] = "guest-self-service"
+                affected_server_hosts.append(srv["host"])
                 break
 
-    if not found_global and not affected_servers:
+    if not found_global and not affected_server_hosts:
         return jsonify({"success": False, "message": f"未在白名单中找到 IP: {old_ip}"}), 404
 
+    # 全局 IP 影响所有服务器；否则仅影响包含该 IP 的服务器
     if found_global:
-        affected_servers = [s["host"] for s in cfg.get("servers", [])]
+        servers_to_deploy = list(cfg.get("servers", []))
+    else:
+        servers_to_deploy = [s for s in cfg.get("servers", []) if s["host"] in affected_server_hosts]
 
-    now = datetime.datetime.now()
+    # 立即持久化白名单变更
+    save_config(cfg)
+
+    # 记录审计条目（已自动批准并待下发结果）
     app_id = now.strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(4)
     application = {
         "id": app_id,
@@ -300,20 +318,64 @@ def api_guest_replace():
         "purpose": f"自助替换: {old_ip} → {new_ip}",
         "duration": "",
         "expire_at": None,
-        "servers": affected_servers,
-        "status": "pending",
-        "approved_servers": [],
+        "servers": [s["host"] for s in servers_to_deploy],
+        "status": "approved",
+        "approved_servers": [s["host"] for s in servers_to_deploy],
         "deployed": False,
-        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "reviewed_at": None,
-        "reviewed_by": None,
+        "created_at": now_str,
+        "reviewed_at": now_str,
+        "reviewed_by": "self-service",
     }
     cfg.setdefault("applications", []).append(application)
+
+    # 立即下发到受影响的服务器
+    ssh_port = cfg["settings"].get("ssh_port", 22)
+    persist = cfg["settings"].get("persist_rules", True)
+    global_whitelist = cfg["whitelist"]
+
+    results = []
+    success_count = 0
+    for server in servers_to_deploy:
+        merged = get_merged_whitelist(server, global_whitelist)
+        if not merged:
+            results.append({
+                "server": server.get("name", server["host"]),
+                "host": server["host"],
+                "success": False,
+                "output": "[SKIP] 白名单已全空，跳过自动下发",
+            })
+            continue
+        script = generate_apply_script(merged, ssh_port, persist)
+        ok, output = capture_run(server, script, config=cfg)
+        if ok:
+            success_count += 1
+        results.append({
+            "server": server.get("name", server["host"]),
+            "host": server["host"],
+            "success": ok,
+            "output": output,
+        })
+
+    application["deployed"] = (success_count == len(results) and success_count > 0)
     save_config(cfg)
+
+    deploy_log = ""
+    for r in results:
+        deploy_log += f"{'=' * 56}\n"
+        deploy_log += f"  服务器: {r['server']} ({r['host']})  {'OK' if r['success'] else 'FAIL'}\n"
+        deploy_log += f"{'-' * 56}\n"
+        deploy_log += r["output"].rstrip() + "\n\n"
+    deploy_log += f"下发完成: {success_count}/{len(results)} 台成功"
+
+    total = len(results)
     return jsonify({
-        "success": True,
-        "message": "替换申请已提交，请等待管理员审核",
+        "success": success_count == total and total > 0,
+        "message": (
+            f"已替换 {old_ip} → {new_ip}，下发 {success_count}/{total} 台成功"
+            if total > 0 else f"已替换 {old_ip} → {new_ip}（无需下发的服务器）"
+        ),
         "id": app_id,
+        "deploy_result": deploy_log if total > 0 else "",
     })
 
 
