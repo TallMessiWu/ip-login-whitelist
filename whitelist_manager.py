@@ -879,7 +879,7 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
             print(f"[WARN] 密码保存失败: {e}")
 
     try:
-        stdin, stdout, stderr = client.exec_command("bash -s", get_pty=True)
+        stdin, stdout, stderr = client.exec_command("bash -s")
         stdin.write(script)
         stdin.channel.shutdown_write()
 
