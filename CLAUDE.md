@@ -42,10 +42,11 @@
 
 ## 关键设计点
 
-- **双层白名单**：全局白名单 + 每台服务器可配专属白名单，下发时合并去重，过期条目不进入合并
+- **双层白名单**：全局白名单 + 每台服务器可配专属白名单，下发时合并去重，过期条目不进入合并；添加全局 IP 时若各服务器专属白名单中存在同 IP，自动清除重复并继承其锁定状态（防"提升到全局"绕过锁定）
 - **时效管理**：`parse_expire()` 支持 `7d`/`24h`/`30m`（相对）、`2025-12-31`（绝对）、留空（永久）；`load_config()` 加载时自动清除过期条目
+- **条目锁定**：白名单条目可设 `locked: true`，锁定后无法被 Web 编辑/删除，也无法被 Guest 自助换 IP 替换；防止误把关键 IP（如管理服务器自身 IP）改掉导致回连失败
 - **代理链**：优先级 per-server `--proxy` > 全局 `settings --proxy` > 环境变量 `ALL_PROXY`，支持 socks5/socks4/http
-- **安全自检**：`deploy` 和 Web 下发前自动检测本机出口 IP 是否在白名单中
+- **安全自检**：`/api/check-my-ip` 部署侧自检（含服务器自身出口探测）；`/api/my-ip` 仅返回 HTTP 真实客户端 IP（供 Guest/申请页填充，不做服务器出口探测）；`POST /api/deploy` 硬拦截：管理机本地出口 IP 必须存在于**全局**白名单中，否则 403 不下发
 - **认证**：Web 端 PBKDF2-HMAC-SHA256 密码哈希（200k 迭代，兼容旧 SHA-256 哈希），session 鉴权，登录速率限制（每 IP 60 秒 ≤10 次），公开路径白名单（`/login`、`/guest`、`/apply`）
 - **CSRF 防护**：所有状态变更请求（POST/PUT/PATCH/DELETE）必须携带 `X-CSRF-Token` 头，前端通过包装 `window.fetch` 自动注入；session cookie 设置 HttpOnly + SameSite=Lax
 - **国际化**：首次访问根据 `Accept-Language` 自动检测语言（中文 → 俄语 → 英文，无法检测默认中文），session 存储偏好；每页右上角语言切换按钮；`translations.py` 236 键三语字典，模板上下文注入 `lang`/`T`，前端 `t(key)` + `data-i18n` 属性翻译
@@ -55,7 +56,7 @@
 
 ```json
 {
-  "whitelist": [{"ip": "", "description": "", "added_by": "", "added_at": "", "expire_at": null}],
+  "whitelist": [{"ip": "", "description": "", "added_by": "", "added_at": "", "expire_at": null, "locked": false}],
   "servers": [{"host": "", "port": 22, "user": "root", "key_file": "", "name": "", "password": "", "proxy": "", "whitelist": []}],
   "settings": {"ssh_port": 22, "persist_rules": true, "proxy": "", "auto_deploy": {"enabled": false, "interval_minutes": 5}, "secret_key": "", "auth": {"username": "admin", "password_hash": "sha256:..."}},
   "applications": [{"id": "", "ip": "", "name": "", "employee_id": "", "purpose": "", "duration": "", "status": "pending", "approved_servers": [], "deployed": false, ...}]
@@ -85,4 +86,8 @@ uv run pytest                # 运行测试
 
 ## 代码提交
 
-每次提交前自主判断是否需要更新 CLAUDE.md（及子模块引用文件 CLAUDE-CLI.md、CLAUDE-WEB.md）和 README.md。功能变更、文件增删、架构调整、API 增减时均需同步更新文档。代码提交时必须使用 gitmoji-commit 这个 skill。
+**文档更新时机**：CLAUDE.md（含子模块 CLAUDE-CLI.md、CLAUDE-WEB.md）和 README.md **只在提交前**才更新，平时迭代过程中不要修改这些文档——避免污染上下文缓存命中率。
+
+**自动提交规则**：一旦本次工作改动了 CLAUDE.md / CLAUDE-CLI.md / CLAUDE-WEB.md 中的任何一个，必须**紧接着** `git add` + `git commit` + `git push`，不可只改文档不提交；同一次工作里的其他代码改动也一并打包进同一次提交。
+
+**提交信息不需用户确认**：使用 gitmoji-commit skill 自行生成并执行提交，无需向用户确认提交信息。功能变更、文件增删、架构调整、API 增减都属于触发文档更新的条件。

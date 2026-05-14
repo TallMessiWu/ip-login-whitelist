@@ -944,6 +944,9 @@ def web_client(tmp_config_file, monkeypatch):
     """创建 Flask 测试客户端，mock 掉 run_on_server。"""
     monkeypatch.setattr(web_app, "run_on_server", mock.MagicMock(return_value=True))
     monkeypatch.setattr(web_app, "capture_run", mock.MagicMock(return_value=(True, "mock output")))
+    # 默认让本地出口探测返回 None，使 /api/deploy 的"管理机本地 IP 必须在全局白名单"硬拦截
+    # 视为"未知 IP"而跳过——既有 deploy 测试无需关心该拦截。需要触发拦截的测试自行 monkeypatch。
+    monkeypatch.setattr(web_app, "get_outgoing_ip", mock.MagicMock(return_value=None))
     monkeypatch.setattr(web_app, "_setup_app_secret", lambda: setattr(web_app.app, "secret_key", "test-key"))
     monkeypatch.setattr(web_app, "_init_scheduler_from_config", lambda: None)
     # 固定 token_hex 输出，确保 CSRF token 可预测
@@ -1453,6 +1456,35 @@ class TestWebCheckMyIp:
         assert resp.status_code == 200
 
 
+# ── /api/my-ip ───────────────────────────────────────────────────────────
+
+class TestWebMyIp:
+    """/api/my-ip 仅返回 HTTP 请求方真实客户端 IP，不做服务器侧出口探测。"""
+
+    def test_my_ip_returns_client_ip(self, web_client):
+        resp = web_client.get("/api/my-ip")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "client_ip" in data
+        assert "is_local" in data
+
+    def test_my_ip_does_not_probe_outgoing(self, web_client, monkeypatch):
+        """关键不变量：不应触发 get_outgoing_ip——避免把网站服务器自身 IP 当作用户 IP。"""
+        probe = mock.MagicMock(return_value="1.2.3.4")
+        monkeypatch.setattr(web_app, "get_outgoing_ip", probe)
+        resp = web_client.get("/api/my-ip")
+        assert resp.status_code == 200
+        probe.assert_not_called()
+
+    def test_my_ip_trusts_xff_when_remote_is_local(self, web_client):
+        """remote_addr 是本地代理时，应优先返回 X-Forwarded-For 链首。"""
+        resp = web_client.get("/api/my-ip", headers={"X-Forwarded-For": "141.66.77.88"})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["client_ip"] == "141.66.77.88"
+        assert data["is_local"] is False
+
+
 # ── /api/guest/replace ───────────────────────────────────────────────────
 
 class TestWebGuestReplace:
@@ -1649,6 +1681,243 @@ class TestWebServersPublic:
         data = resp.get_json()
         assert len(data["servers"]) == 1
         assert "password" not in data["servers"][0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 白名单条目锁定（防 guest 误换 / 误删 / 误编辑关键 IP）
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestWebWhitelistLock:
+    def test_lock_global_entry(self, logged_in_client, sample_config):
+        resp = logged_in_client.patch("/api/whitelist/192.168.1.0%2F24/lock", json={"locked": True})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["entry"]["locked"] is True
+
+    def test_unlock_global_entry(self, logged_in_client, tmp_config_file):
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["whitelist"][0]["locked"] = True
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        resp = logged_in_client.patch("/api/whitelist/192.168.1.0%2F24/lock", json={"locked": False})
+        assert resp.status_code == 200
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        assert "locked" not in saved["whitelist"][0]
+
+    def test_lock_missing_field(self, logged_in_client, sample_config):
+        resp = logged_in_client.patch("/api/whitelist/192.168.1.0%2F24/lock", json={})
+        assert resp.status_code == 400
+
+    def test_lock_unknown_ip(self, logged_in_client, sample_config):
+        resp = logged_in_client.patch("/api/whitelist/9.9.9.9/lock", json={"locked": True})
+        assert resp.status_code == 404
+
+    def test_delete_locked_global_entry_rejected(self, logged_in_client, tmp_config_file):
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["whitelist"][0]["locked"] = True
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        resp = logged_in_client.delete("/api/whitelist/192.168.1.0%2F24")
+        assert resp.status_code == 403
+        # 条目仍在
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        assert any(e["ip"] == "192.168.1.0/24" for e in saved["whitelist"])
+
+    def test_edit_locked_global_entry_rejected(self, logged_in_client, tmp_config_file):
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["whitelist"][0]["locked"] = True
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        resp = logged_in_client.patch("/api/whitelist/192.168.1.0%2F24", json={"description": "changed"})
+        assert resp.status_code == 403
+
+    def test_guest_replace_locked_rejected(self, web_client, tmp_config_file):
+        """锁定的关键 IP 不可被 Guest 自助换 IP 替换（这是本功能的核心安全保证）。"""
+        cfg = {
+            "whitelist": [{
+                "ip": "141.66.66.66",
+                "description": "site-server-self-loop",
+                "added_by": "admin",
+                "added_at": "2025-01-01 10:00:00",
+                "locked": True,
+            }],
+            "servers": [],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        resp = web_client.post("/api/guest/replace", json={
+            "old_ip": "141.66.66.66", "new_ip": "10.0.0.1",
+        })
+        assert resp.status_code == 403
+        # 条目未被改动
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        assert saved["whitelist"][0]["ip"] == "141.66.66.66"
+
+    def test_guest_replace_locked_server_entry_rejected(self, web_client, tmp_config_file):
+        """服务器专属白名单中的锁定条目同样不可被 Guest 替换。"""
+        cfg = {
+            "whitelist": [],
+            "servers": [{
+                "host": "10.0.0.1", "port": 22, "user": "root", "key_file": "",
+                "name": "s1", "password": "",
+                "whitelist": [{
+                    "ip": "203.0.113.5", "description": "critical",
+                    "added_by": "admin", "added_at": "2025-01-01 10:00:00",
+                    "locked": True,
+                }],
+            }],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        resp = web_client.post("/api/guest/replace", json={
+            "old_ip": "203.0.113.5", "new_ip": "10.10.10.10",
+        })
+        assert resp.status_code == 403
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        assert saved["servers"][0]["whitelist"][0]["ip"] == "203.0.113.5"
+
+    def test_lock_server_entry_and_block_delete(self, logged_in_client, tmp_config_file):
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["servers"][0]["whitelist"] = [{
+            "ip": "10.5.5.5", "description": "", "added_by": "admin",
+            "added_at": "2025-01-01 10:00:00",
+        }]
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+        lock = logged_in_client.patch("/api/servers/10.0.0.1/whitelist/10.5.5.5/lock",
+                                       json={"locked": True})
+        assert lock.status_code == 200
+
+        rm = logged_in_client.delete("/api/servers/10.0.0.1/whitelist/10.5.5.5")
+        assert rm.status_code == 403
+
+        edit = logged_in_client.patch("/api/servers/10.0.0.1/whitelist/10.5.5.5",
+                                      json={"description": "new"})
+        assert edit.status_code == 403
+
+    def test_unlocked_entry_can_be_replaced_by_guest(self, web_client, tmp_config_file):
+        """回归：未锁定的条目仍可正常被 Guest 替换。"""
+        cfg = {
+            "whitelist": [{
+                "ip": "10.1.1.1", "description": "alice",
+                "added_by": "admin", "added_at": "2025-01-01 10:00:00",
+            }],
+            "servers": [],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        resp = web_client.post("/api/guest/replace", json={
+            "old_ip": "10.1.1.1", "new_ip": "10.2.2.2",
+        })
+        assert resp.status_code == 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 锁定状态从专属白名单继承到全局白名单
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestLockInheritanceWeb:
+    """提升到全局白名单时必须继承原专属白名单的锁定状态（防绕过锁定）。"""
+
+    def test_global_add_inherits_locked_from_server_whitelist(self, logged_in_client, tmp_config_file):
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["servers"][0]["whitelist"] = [{
+            "ip": "5.5.5.5", "description": "critical-on-srv1",
+            "added_by": "admin", "added_at": "2025-01-01 10:00:00",
+            "locked": True,
+        }]
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+        resp = logged_in_client.post("/api/whitelist",
+                                     json={"ip": "5.5.5.5", "description": "global"})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["entry"]["locked"] is True
+
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        new_entry = next(e for e in saved["whitelist"] if e["ip"] == "5.5.5.5")
+        assert new_entry.get("locked") is True
+        # 专属白名单中的同 IP 已被清除
+        assert not any(e["ip"] == "5.5.5.5" for e in saved["servers"][0]["whitelist"])
+
+    def test_global_add_no_inherit_when_unlocked(self, logged_in_client, tmp_config_file):
+        """专属条目未锁定时，新建全局条目也不应自动加锁。"""
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["servers"][0]["whitelist"] = [{
+            "ip": "6.6.6.6", "description": "not-critical",
+            "added_by": "admin", "added_at": "2025-01-01 10:00:00",
+        }]
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+        resp = logged_in_client.post("/api/whitelist", json={"ip": "6.6.6.6"})
+        assert resp.status_code == 200
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        new_entry = next(e for e in saved["whitelist"] if e["ip"] == "6.6.6.6")
+        assert not new_entry.get("locked")
+
+
+class TestLockInheritanceCLI:
+    def test_cli_ip_add_inherits_locked(self, tmp_config_file, capsys):
+        cfg = {
+            "whitelist": [],
+            "servers": [{
+                "host": "10.0.0.1", "port": 22, "user": "root", "key_file": "",
+                "name": "s1", "password": "",
+                "whitelist": [{
+                    "ip": "7.7.7.7", "description": "", "added_by": "admin",
+                    "added_at": "2025-01-01 10:00:00", "locked": True,
+                }],
+            }],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+        args = mock.MagicMock(ip="7.7.7.7", desc="from-cli", server=None, expire=None)
+        wm.cmd_ip_add(args)
+
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        new_entry = next(e for e in saved["whitelist"] if e["ip"] == "7.7.7.7")
+        assert new_entry.get("locked") is True
+        assert not any(e["ip"] == "7.7.7.7" for e in saved["servers"][0]["whitelist"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 下发硬拦截：管理机本地 IP 必须在全局白名单中
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestDeployBlocksUnlistedManagementHost:
+    def test_deploy_blocked_when_local_ip_not_in_global(self, logged_in_client, sample_config, monkeypatch):
+        """探测到管理机出口 IP，但该 IP 不在全局白名单中——必须拦截，不下发任何脚本。"""
+        monkeypatch.setattr(web_app, "get_outgoing_ip", mock.MagicMock(return_value="203.0.113.99"))
+        run_mock = mock.MagicMock(return_value=True)
+        monkeypatch.setattr(web_app, "run_on_server", run_mock)
+        capture_mock = mock.MagicMock(return_value=(True, "out"))
+        monkeypatch.setattr(web_app, "capture_run", capture_mock)
+
+        resp = logged_in_client.post("/api/deploy", json={})
+        assert resp.status_code == 403
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "203.0.113.99" in data["message"]
+        # 关键：被拦截时不可触发实际下发
+        capture_mock.assert_not_called()
+
+    def test_deploy_allowed_when_local_ip_in_global(self, logged_in_client, sample_config, monkeypatch):
+        """管理机 IP 在全局白名单（被 CIDR 覆盖）时正常放行。"""
+        # sample_config 的全局白名单是 192.168.1.0/24
+        monkeypatch.setattr(web_app, "get_outgoing_ip", mock.MagicMock(return_value="192.168.1.42"))
+        resp = logged_in_client.post("/api/deploy", json={})
+        assert resp.status_code == 200
+
+    def test_deploy_allowed_when_probe_returns_none(self, logged_in_client, sample_config, monkeypatch):
+        """探测失败（None/loopback）时不拦截，沿用既有行为。"""
+        monkeypatch.setattr(web_app, "get_outgoing_ip", mock.MagicMock(return_value=None))
+        resp = logged_in_client.post("/api/deploy", json={})
+        assert resp.status_code == 200
+
+    def test_deploy_dry_run_bypasses_block(self, logged_in_client, sample_config, monkeypatch):
+        """dry_run 仅生成脚本预览，不真正下发，跳过拦截。"""
+        monkeypatch.setattr(web_app, "get_outgoing_ip", mock.MagicMock(return_value="203.0.113.99"))
+        resp = logged_in_client.post("/api/deploy", json={"dry_run": True})
+        assert resp.status_code == 200
 
 
 def test_total_count():

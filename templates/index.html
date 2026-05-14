@@ -693,7 +693,35 @@
         return;
       }
 
-      el.innerHTML = wl.map(e => `
+      el.innerHTML = wl.map(e => {
+        const isLocked = !!e.locked;
+        const lockBadge = isLocked
+          ? `<span class="text-xs text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-lock mr-0.5"></i>${t('wl_locked_badge')}</span>`
+          : '';
+        const editBtn = isLocked ? '' : `
+            <button onclick="openEditIPModal('${escAttr(e.ip)}', '')"
+              class="text-blue-400 hover:text-blue-600 hover:bg-blue-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
+              title="${t('edit')}">
+              <i class="fas fa-pen text-xs"></i>
+            </button>`;
+        const removeBtn = isLocked ? '' : `
+            <button onclick="removeIP('${escAttr(e.ip)}')"
+              class="text-red-400 hover:text-red-600 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
+              title="${t('delete')}">
+              <i class="fas fa-trash-can text-xs"></i>
+            </button>`;
+        const lockBtn = isLocked
+          ? `<button onclick="toggleLockIP('${escAttr(e.ip)}', '', false)"
+              class="text-amber-500 hover:text-amber-700 hover:bg-amber-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
+              title="${t('wl_unlock_title')}">
+              <i class="fas fa-lock-open text-xs"></i>
+            </button>`
+          : `<button onclick="toggleLockIP('${escAttr(e.ip)}', '', true)"
+              class="text-slate-400 hover:text-amber-600 hover:bg-amber-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
+              title="${t('wl_lock_title')}">
+              <i class="fas fa-lock text-xs"></i>
+            </button>`;
+        return `
         <div class="px-5 py-2.5 flex items-center justify-between hover:bg-slate-50 group fade-in">
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2 flex-wrap">
@@ -702,24 +730,19 @@
                 ? `<span class="text-slate-400">${escHtml(e.description)}</span>`
                 : ''}
               ${renderExpireBadge(e.expire_at)}
+              ${lockBadge}
             </div>
             <div class="text-xs text-slate-300 mt-0.5">
               ${escHtml(e.added_by || '')}${e.added_at ? ' · ' + escHtml(e.added_at) : ''}
             </div>
           </div>
           <div class="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 ml-2 flex-shrink-0 transition-all">
-            <button onclick="openEditIPModal('${escAttr(e.ip)}', '')"
-              class="text-blue-400 hover:text-blue-600 hover:bg-blue-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
-              title="${t('edit')}">
-              <i class="fas fa-pen text-xs"></i>
-            </button>
-            <button onclick="removeIP('${escAttr(e.ip)}')"
-              class="text-red-400 hover:text-red-600 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-colors"
-              title="${t('delete')}">
-              <i class="fas fa-trash-can text-xs"></i>
-            </button>
+            ${editBtn}
+            ${lockBtn}
+            ${removeBtn}
           </div>
-        </div>`).join('');
+        </div>`;
+      }).join('');
     }
 
     // ─── 渲染服务器 ────────────────────────────────────────────────
@@ -750,26 +773,49 @@
           ? `<span class="text-xs text-indigo-600 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded-full">${t('srv_whitelist_count', {n: swl.length})}</span>`
           : '';
 
-        const swlRows = swl.map(e => `
+        const swlRows = swl.map(e => {
+          const isLocked = !!e.locked;
+          const lockBadge = isLocked
+            ? `<span class="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1 py-0 rounded-full"><i class="fas fa-lock mr-0.5"></i>${t('wl_locked_badge')}</span>`
+            : '';
+          const editBtn = isLocked ? '' : `
+              <button onclick="openEditIPModal('${escAttr(e.ip)}','${escAttr(s.host)}')"
+                class="text-blue-400 hover:text-blue-600 w-5 h-5 flex items-center justify-center rounded transition-colors"
+                title="${t('edit')}">
+                <i class="fas fa-pen" style="font-size:10px"></i>
+              </button>`;
+          const removeBtn = isLocked ? '' : `
+              <button onclick="removeServerIP('${escAttr(s.host)}','${escAttr(e.ip)}')"
+                class="text-red-400 hover:text-red-600 w-5 h-5 flex items-center justify-center rounded transition-colors"
+                title="${t('delete')}">
+                <i class="fas fa-xmark" style="font-size:10px"></i>
+              </button>`;
+          const lockBtn = isLocked
+            ? `<button onclick="toggleLockIP('${escAttr(e.ip)}','${escAttr(s.host)}', false)"
+                class="text-amber-500 hover:text-amber-700 w-5 h-5 flex items-center justify-center rounded transition-colors"
+                title="${t('wl_unlock_title')}">
+                <i class="fas fa-lock-open" style="font-size:10px"></i>
+              </button>`
+            : `<button onclick="toggleLockIP('${escAttr(e.ip)}','${escAttr(s.host)}', true)"
+                class="text-slate-400 hover:text-amber-600 w-5 h-5 flex items-center justify-center rounded transition-colors"
+                title="${t('wl_lock_title')}">
+                <i class="fas fa-lock" style="font-size:10px"></i>
+              </button>`;
+          return `
           <div class="flex items-center justify-between py-1 group">
             <div class="flex items-center gap-1.5 flex-wrap min-w-0 flex-1">
               <span class="font-mono text-xs text-slate-700">${escHtml(e.ip)}</span>
               ${e.description ? `<span class="text-xs text-slate-400">${escHtml(e.description)}</span>` : ''}
               ${renderExpireBadge(e.expire_at, true)}
+              ${lockBadge}
             </div>
             <div class="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 flex-shrink-0 transition-all">
-              <button onclick="openEditIPModal('${escAttr(e.ip)}','${escAttr(s.host)}')"
-                class="text-blue-400 hover:text-blue-600 w-5 h-5 flex items-center justify-center rounded transition-colors"
-                title="${t('edit')}">
-                <i class="fas fa-pen" style="font-size:10px"></i>
-              </button>
-              <button onclick="removeServerIP('${escAttr(s.host)}','${escAttr(e.ip)}')"
-                class="text-red-400 hover:text-red-600 w-5 h-5 flex items-center justify-center rounded transition-colors"
-                title="${t('delete')}">
-                <i class="fas fa-xmark" style="font-size:10px"></i>
-              </button>
+              ${editBtn}
+              ${lockBtn}
+              ${removeBtn}
             </div>
-          </div>`).join('');
+          </div>`;
+        }).join('');
 
         return `
           <div class="border-b border-slate-50 last:border-0 fade-in" id="srv-${escAttr(s.host)}">
@@ -1151,6 +1197,34 @@
           await refreshAll();
         } else {
           toast(data.message, 'error');
+        }
+      } catch (e) {
+        toast(t('operation_failed'), 'error');
+      }
+    }
+
+    async function toggleLockIP(ip, scope, lock) {
+      const confirmKey = lock ? 'wl_lock_confirm' : 'wl_unlock_confirm';
+      if (!confirm(t(confirmKey, {ip: ip}))) return;
+      const url = scope
+        ? `/api/servers/${encodeURIComponent(scope)}/whitelist/${encodeURIComponent(ip)}/lock`
+        : `/api/whitelist/${encodeURIComponent(ip)}/lock`;
+      try {
+        const res = await fetch(url, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ locked: !!lock }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          toast(data.message || t(lock ? 'wl_locked_msg' : 'wl_unlocked_msg', {ip: ip}), 'success');
+          await refreshAll();
+          if (scope) {
+            const el = document.getElementById('swl-' + scope);
+            if (el) el.classList.remove('hidden');
+          }
+        } else {
+          toast(data.message || t('operation_failed'), 'error');
         }
       } catch (e) {
         toast(t('operation_failed'), 'error');

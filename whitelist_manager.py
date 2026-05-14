@@ -300,20 +300,31 @@ def cmd_ip_add(args):
         if any(e["ip"] == ip for e in config["whitelist"]):
             print(f"[WARN] {ip} 已在全局白名单中，跳过")
             return
-        config["whitelist"].append(_make_ip_entry(ip, args.desc, expire_at))
+        new_entry = _make_ip_entry(ip, args.desc, expire_at)
+        config["whitelist"].append(new_entry)
 
-        # 全局已覆盖，清理各服务器专属白名单中的重复 IP
+        # 全局已覆盖，清理各服务器专属白名单中的重复 IP；继承锁定状态
         cleaned = 0
+        inherited_locked = False
         for srv in config.get("servers", []):
             wl = srv.get("whitelist", [])
+            for e in wl:
+                if e["ip"] == ip and e.get("locked"):
+                    inherited_locked = True
+                    break
             before = len(wl)
             srv["whitelist"] = [e for e in wl if e["ip"] != ip]
             cleaned += before - len(srv["whitelist"])
+
+        if inherited_locked:
+            new_entry["locked"] = True
 
         save_config(config)
         msg = f"[OK] 已添加 {ip} 到全局白名单{expire_label}"
         if cleaned:
             msg += f"，已从 {cleaned} 台服务器专属白名单中移除（全局已覆盖）"
+        if inherited_locked:
+            msg += "；已继承原专属白名单的锁定状态"
         print(msg)
 
 

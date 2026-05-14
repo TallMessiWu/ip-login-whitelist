@@ -15,7 +15,7 @@
 | 登出 API | `POST /api/logout` → `api_logout()` | L166 |
 | 修改密码 API | `PATCH /api/auth/password` → `api_change_password()` | L516 |
 
-公开路径（无需登录）：`/login`、`/guest`、`/apply` 及对应的 `/api/*` 路由 + `/api/servers-public`、`/api/check-my-ip`。
+公开路径（无需登录）：`/login`、`/guest`、`/apply` 及对应的 `/api/*` 路由 + `/api/servers-public`、`/api/check-my-ip`、`/api/my-ip`。
 
 ## 二、Guest 自助换 IP（L187-380）
 
@@ -49,8 +49,9 @@
 | 添加全局 IP | `POST /api/whitelist` | L774 |
 | 删除全局 IP | `DELETE /api/whitelist/<ip>` | L815 |
 | 编辑全局 IP（IP/备注/有效期） | `PATCH /api/whitelist/<ip>` | L828 |
+| 锁定/解锁全局 IP | `PATCH /api/whitelist/<ip>/lock` body=`{locked: bool}` | — |
 
-添加全局 IP 时自动清除各服务器专属白名单重复项（L800-806）。
+添加全局 IP 时自动清除各服务器专属白名单重复项，并**继承锁定状态**：任一被清除的专属条目处于 `locked=true` 时，新建的全局条目也自动加锁（防"提升到全局"绕过锁定）。锁定的条目无法被删除/编辑/Guest 替换，需先解锁。
 
 ## 五、服务器管理 API（L864-922）
 
@@ -67,12 +68,14 @@
 | 添加专属 IP | `POST /api/servers/<host>/whitelist` | L927 |
 | 删除专属 IP | `DELETE /api/servers/<host>/whitelist/<ip>` | L961 |
 | 编辑专属 IP | `PATCH /api/servers/<host>/whitelist/<ip>` | L977 |
+| 锁定/解锁专属 IP | `PATCH /api/servers/<host>/whitelist/<ip>/lock` body=`{locked: bool}` | — |
 
 ## 七、部署与运维 API（L1040-1231）
 
 | 功能 | 路由 | 行号 |
 |---|---|---|
 | 部署前 IP 安全自检 | `GET /api/check-my-ip` → `api_check_my_ip()` | L1043 |
+| 仅返回 HTTP 客户端 IP（申请页用） | `GET /api/my-ip` → `api_my_ip()` | — |
 | 下发白名单（审计/dry-run） | `POST /api/deploy` → `api_deploy()` | L1080 |
 | 撤销白名单 | `POST /api/remove` → `api_remove()` | L1133 |
 | 查看服务器状态 | `GET /api/status` → `api_status()` | L1176 |
@@ -80,7 +83,11 @@
 | 全局设置 | `PATCH /api/settings` → `api_settings()` | L1020 |
 | 读取完整配置（隐藏密码） | `GET /api/config` → `api_config()` | L759 |
 
-`/api/check-my-ip`：检测 X-Forwarded-For / remote_addr，localhost 时探测真实出口 IP。
+`/api/check-my-ip`：检测 X-Forwarded-For / remote_addr，localhost 时探测真实出口 IP（用于部署侧自检）。
+
+`/api/my-ip`：仅返回 HTTP 客户端 IP（X-Forwarded-For / remote_addr），**永不**触发出口探测——避免反向代理未注入 X-Forwarded-For 时把网站服务器自身 IP 当作用户 IP 返回给申请页面。返回 `{client_ip, is_local}`。
+
+`POST /api/deploy` 硬拦截（非 dry_run）：调用 `get_outgoing_ip` 探测管理机本地出口 IP；若不在 `cfg["whitelist"]`（**全局**白名单）中则返回 403 且不触发 `capture_run`，防止误下发使管理机失去对目标服务器的 SSH 访问能力。口径比前端 `/api/check-my-ip` 的合并白名单更严：只接受全局，强制管理机 IP 全局可达。
 
 ## 八、后台调度器（L537-733）
 

@@ -245,9 +245,9 @@
       btn.innerHTML = '<i class="fas fa-circle-notch spin mr-0.5"></i>' + t('apply_detecting');
       btn.disabled = true;
       try {
-        const res = await fetch('/api/check-my-ip');
+        const res = await fetch('/api/my-ip');
         const data = await res.json();
-        if (data.client_ip && data.client_ip !== '127.0.0.1' && data.client_ip !== '::1') {
+        if (data.client_ip && !data.is_local) {
           document.getElementById('ip').value = data.client_ip;
         } else {
           showErr(t('apply_cannot_detect'));

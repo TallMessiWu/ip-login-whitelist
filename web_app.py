@@ -307,6 +307,16 @@ def api_guest_replace():
     now = datetime.datetime.now()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
+    # 锁定保护：旧 IP 在全局或任一服务器中被标记为 locked 即拒绝替换，
+    # 防止 guest 误将关键 IP（如网站服务器 IP）替换掉导致回连失败。
+    for entry in cfg.get("whitelist", []):
+        if entry["ip"] == old_ip and entry.get("locked"):
+            return jsonify({"success": False, "message": f"{old_ip} 已被锁定，无法通过自助换 IP 替换"}), 403
+    for srv in cfg.get("servers", []):
+        for entry in srv.get("whitelist", []):
+            if entry["ip"] == old_ip and entry.get("locked"):
+                return jsonify({"success": False, "message": f"{old_ip} 已被锁定，无法通过自助换 IP 替换"}), 403
+
     # 原地更新旧 IP → 新 IP，保留 description / expire_at 等元数据（仅替换 IP 本身）。
     # added_by 标记为 guest-self-service 以便审计追溯；added_at 刷新为本次替换时间。
     found_global = False
@@ -966,30 +976,43 @@ def api_whitelist_add():
     entry = _make_ip_entry(ip, description, expire_at, added_by=added_by)
     cfg["whitelist"].append(entry)
 
-    # 全局已覆盖，清理各服务器专属白名单中的重复 IP
+    # 全局已覆盖，清理各服务器专属白名单中的重复 IP；
+    # 继承锁定：任一被清除的专属条目处于锁定状态时，新建的全局条目也默认锁定，
+    # 避免"提升到全局"成为绕过锁定的漏洞。
     cleaned = 0
+    inherited_locked = False
     for srv in cfg.get("servers", []):
         wl = srv.get("whitelist", [])
+        for e in wl:
+            if e["ip"] == ip and e.get("locked"):
+                inherited_locked = True
+                break
         before = len(wl)
         srv["whitelist"] = [e for e in wl if e["ip"] != ip]
         cleaned += before - len(srv["whitelist"])
+
+    if inherited_locked:
+        entry["locked"] = True
 
     save_config(cfg)
     msg = f"已添加 {ip}"
     if cleaned:
         msg += f"，已从 {cleaned} 台服务器专属白名单中移除（全局已覆盖）"
+    if inherited_locked:
+        msg += "；已继承原专属白名单的锁定状态"
     return jsonify({"success": True, "message": msg, "entry": entry})
 
 
 @app.route("/api/whitelist/<path:ip>", methods=["DELETE"])
 def api_whitelist_remove(ip):
     cfg = load_config()
-    before = len(cfg["whitelist"])
-    cfg["whitelist"] = [e for e in cfg["whitelist"] if e["ip"] != ip]
-
-    if len(cfg["whitelist"]) == before:
+    entry = next((e for e in cfg["whitelist"] if e["ip"] == ip), None)
+    if entry is None:
         return jsonify({"success": False, "message": f"{ip} 不在白名单中"}), 404
+    if entry.get("locked"):
+        return jsonify({"success": False, "message": f"{ip} 已锁定，请先解锁再删除"}), 403
 
+    cfg["whitelist"] = [e for e in cfg["whitelist"] if e["ip"] != ip]
     save_config(cfg)
     return jsonify({"success": True, "message": f"已移除 {ip}"})
 
@@ -1003,6 +1026,8 @@ def api_whitelist_update(ip):
     entry = next((e for e in cfg["whitelist"] if e["ip"] == ip), None)
     if not entry:
         return jsonify({"success": False, "message": f"{ip} 不在白名单中"}), 404
+    if entry.get("locked"):
+        return jsonify({"success": False, "message": f"{ip} 已锁定，请先解锁再编辑"}), 403
 
     if "ip" in data:
         new_ip = data["ip"].strip()
@@ -1012,9 +1037,13 @@ def api_whitelist_update(ip):
             if any(e["ip"] == new_ip for e in cfg["whitelist"]):
                 return jsonify({"success": False, "message": f"{new_ip} 已在白名单中"}), 409
             entry["ip"] = new_ip
-            # 全局已覆盖新 IP，清理各服务器专属白名单中的重复
+            # 全局已覆盖新 IP，清理各服务器专属白名单中的重复并继承锁定
             for srv in cfg.get("servers", []):
                 wl = srv.get("whitelist", [])
+                for e in wl:
+                    if e["ip"] == new_ip and e.get("locked"):
+                        entry["locked"] = True
+                        break
                 srv["whitelist"] = [e for e in wl if e["ip"] != new_ip]
 
     if "description" in data:
@@ -1032,6 +1061,27 @@ def api_whitelist_update(ip):
 
     save_config(cfg)
     return jsonify({"success": True, "message": "已更新", "entry": entry})
+
+
+@app.route("/api/whitelist/<path:ip>/lock", methods=["PATCH"])
+def api_whitelist_lock(ip):
+    """锁定/解锁全局白名单条目。锁定后该条目无法被删除、编辑或被 Guest 自助换 IP。"""
+    data = request.json or {}
+    if "locked" not in data:
+        return jsonify({"success": False, "message": "缺少 locked 字段"}), 400
+    locked = bool(data["locked"])
+
+    cfg = load_config()
+    entry = next((e for e in cfg["whitelist"] if e["ip"] == ip), None)
+    if not entry:
+        return jsonify({"success": False, "message": f"{ip} 不在白名单中"}), 404
+
+    if locked:
+        entry["locked"] = True
+    else:
+        entry.pop("locked", None)
+    save_config(cfg)
+    return jsonify({"success": True, "message": ("已锁定" if locked else "已解锁") + f" {ip}", "entry": entry})
 
 
 # ─── API：服务器管理 ──────────────────────────────────────────────────────────
@@ -1139,11 +1189,14 @@ def api_server_whitelist_remove(host, ip):
     if not srv:
         return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
 
-    before = len(srv.get("whitelist", []))
-    srv["whitelist"] = [e for e in srv.get("whitelist", []) if e["ip"] != ip]
-    if len(srv["whitelist"]) == before:
+    wl = srv.get("whitelist", [])
+    entry = next((e for e in wl if e["ip"] == ip), None)
+    if entry is None:
         return jsonify({"success": False, "message": f"{ip} 不在该服务器白名单中"}), 404
+    if entry.get("locked"):
+        return jsonify({"success": False, "message": f"{ip} 已锁定，请先解锁再删除"}), 403
 
+    srv["whitelist"] = [e for e in wl if e["ip"] != ip]
     save_config(cfg)
     return jsonify({"success": True, "message": f"已移除 {ip}"})
 
@@ -1162,6 +1215,8 @@ def api_server_whitelist_update(host, ip):
     entry = next((e for e in wl if e["ip"] == ip), None)
     if not entry:
         return jsonify({"success": False, "message": f"{ip} 不在该服务器白名单中"}), 404
+    if entry.get("locked"):
+        return jsonify({"success": False, "message": f"{ip} 已锁定，请先解锁再编辑"}), 403
 
     if "ip" in data:
         new_ip = data["ip"].strip()
@@ -1189,6 +1244,31 @@ def api_server_whitelist_update(host, ip):
     return jsonify({"success": True, "message": f"已更新", "entry": entry})
 
 
+@app.route("/api/servers/<path:host>/whitelist/<path:ip>/lock", methods=["PATCH"])
+def api_server_whitelist_lock(host, ip):
+    """锁定/解锁服务器专属白名单条目。"""
+    data = request.json or {}
+    if "locked" not in data:
+        return jsonify({"success": False, "message": "缺少 locked 字段"}), 400
+    locked = bool(data["locked"])
+
+    cfg = load_config()
+    srv = _find_server(cfg, host)
+    if not srv:
+        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+
+    entry = next((e for e in srv.get("whitelist", []) if e["ip"] == ip), None)
+    if not entry:
+        return jsonify({"success": False, "message": f"{ip} 不在该服务器白名单中"}), 404
+
+    if locked:
+        entry["locked"] = True
+    else:
+        entry.pop("locked", None)
+    save_config(cfg)
+    return jsonify({"success": True, "message": ("已锁定" if locked else "已解锁") + f" {ip}", "entry": entry})
+
+
 # ─── API：设置 ────────────────────────────────────────────────────────────────
 
 @app.route("/api/settings", methods=["PATCH"])
@@ -1214,6 +1294,29 @@ def api_settings():
 
 # ─── API：部署安全自检 ────────────────────────────────────────────────────────
 
+def _http_client_ip() -> str:
+    """提取 HTTP 请求的真实客户端 IP（X-Forwarded-For / remote_addr），不做服务器侧的出口探测。"""
+    remote_addr = request.remote_addr or ""
+    trusted_proxies = {"127.0.0.1", "::1", "localhost"}
+    if remote_addr in trusted_proxies:
+        forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        return forwarded or remote_addr
+    return remote_addr
+
+
+@public_route("/api/my-ip")
+def api_my_ip():
+    """返回 HTTP 请求方的客户端 IP（用于 Guest/申请页自动填充）。
+
+    与 /api/check-my-ip 的关键区别：仅返回客户端连接源 IP，不做服务器自身出口探测。
+    申请场景需要的是用户挂 VPN/代理后看到的真实公网 IP，而不是 Web 服务器自身的出口 IP——
+    后者在反向代理未注入 X-Forwarded-For 时会误把网站服务器 IP 当成"用户 IP"。
+    """
+    client_ip = _http_client_ip()
+    localhost_addrs = {"", "127.0.0.1", "::1", "localhost"}
+    return jsonify({"client_ip": client_ip, "is_local": client_ip in localhost_addrs})
+
+
 @public_route("/api/check-my-ip")
 def api_check_my_ip():
     """检测本机出口 IP 是否在目标服务器白名单中。"""
@@ -1223,14 +1326,7 @@ def api_check_my_ip():
     if server_filter:
         servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
 
-    # 仅当请求来自本地反向代理时才信任 X-Forwarded-For
-    remote_addr = request.remote_addr or ""
-    trusted_proxies = {"127.0.0.1", "::1", "localhost"}
-    if remote_addr in trusted_proxies:
-        forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        http_client_ip = forwarded or remote_addr
-    else:
-        http_client_ip = remote_addr
+    http_client_ip = _http_client_ip()
 
     # 若客户端是 localhost，说明 Web 界面本地访问，需探测真实出口 IP
     localhost_addrs = {"127.0.0.1", "::1", "localhost"}
@@ -1280,6 +1376,25 @@ def api_deploy():
 
     if all(not m for m in server_merged_map.values()):
         return jsonify({"success": False, "message": "白名单为空，部署会阻断所有 SSH 连接，请先添加 IP"}), 400
+
+    # 硬拦截：管理服务器（运行本 Web 应用的主机）的本地出口 IP 必须在全局白名单中。
+    # 防止误删/误改导致管理机失去对目标服务器的 SSH 访问能力——此处只接受全局白名单，
+    # 不接受专属白名单（强制管理机 IP 全局可达，避免单台服务器维护时把管理机摘掉）。
+    # dry_run 仅生成脚本预览，不会真正下发，跳过此检查。
+    if not dry_run:
+        first_host = servers[0]["host"]
+        local_ip = get_outgoing_ip(first_host)
+        loopback_or_unknown = {None, "", "127.0.0.1", "::1"}
+        if local_ip not in loopback_or_unknown and not ip_covered_by_whitelist(local_ip, global_whitelist):
+            return jsonify({
+                "success": False,
+                "message": (
+                    f"拦截：管理服务器本地 IP {local_ip} 不在全局白名单中。"
+                    f"下发后管理机将无法 SSH 到目标服务器。"
+                    f"请先将该 IP 加入全局白名单（建议同时锁定）。"
+                ),
+                "local_ip": local_ip,
+            }), 403
 
     ssh_port = cfg["settings"].get("ssh_port", 22)
     persist = cfg["settings"].get("persist_rules", True)
