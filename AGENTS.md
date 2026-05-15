@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 通过 SSH 将 `iptables` 或 `firewalld` 规则下发到远端 Linux 服务器，限制只有白名单 IP 才能登录。同时提供 Flask Web 管理界面。
 
@@ -18,9 +18,9 @@
 | `requirements.txt` | `flask>=3.0.0`（paramiko 可选；兼容 pip 安装） |
 | `config.json` | 运行时生成，存储白名单/服务器/认证等（已 gitignore） |
 
-详细功能→代码位置映射见子模块：
-- [CLAUDE-CLI.md](CLAUDE-CLI.md) — CLI 命令、核心库函数（脚本生成、SSH 执行、时效管理、白名单合并）
-- [CLAUDE-WEB.md](CLAUDE-WEB.md) — Web 后端 API、认证、调度器、前端模板
+详细功能→代码位置映射见 CLI 与 Web 细分指导文档：
+- CLI 命令、核心库函数（脚本生成、SSH 执行、时效管理、白名单合并）
+- Web 后端 API、认证、调度器、前端模板
 
 ## 代码架构
 
@@ -86,8 +86,8 @@ uv run pytest                # 运行测试
 
 ## 代码提交
 
-**文档更新时机**：CLAUDE.md（含子模块 CLAUDE-CLI.md、CLAUDE-WEB.md）和 README.md **只在提交前**才更新，平时迭代过程中不要修改这些文档——避免污染上下文缓存命中率。
+**文档更新时机**：AGENTS.md、README.md 以及相关细分指导文档 **只在提交前**才更新，平时迭代过程中不要修改这些文档——避免污染上下文缓存命中率。
 
-**自动提交规则**：一旦本次工作改动了 CLAUDE.md / CLAUDE-CLI.md / CLAUDE-WEB.md 中的任何一个，必须**紧接着** `git add` + `git commit` + `git push`，不可只改文档不提交；同一次工作里的其他代码改动也一并打包进同一次提交。
+**自动提交规则**：一旦本次工作改动了 AGENTS.md 或相关细分指导文档中的任何一个，必须**紧接着** `git add` + `git commit` + `git push`，不可只改文档不提交；同一次工作里的其他代码改动也一并打包进同一次提交。
 
 **提交信息不需用户确认**：使用 gitmoji-commit skill 自行生成并执行提交，无需向用户确认提交信息。功能变更、文件增删、架构调整、API 增减都属于触发文档更新的条件。
