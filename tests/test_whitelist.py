@@ -1383,6 +1383,97 @@ class TestWebApplications:
         resp = logged_in_client.post("/api/applications/deploy", json={})
         assert resp.status_code == 400
 
+    def test_approve_skips_existing_ip_with_message(self, logged_in_client, tmp_config_file):
+        """目标服务器专属白名单已有同 IP 时，审批仍 200，但消息提示该服务器被跳过且原条目元数据保留。"""
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["servers"][0]["whitelist"] = [{
+            "ip": "5.5.5.5", "description": "旧描述-勿改",
+            "added_by": "previous-user",
+            "added_at": "2025-01-01 10:00:00",
+        }]
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+        logged_in_client.post("/api/apply", json={
+            "ip": "5.5.5.5", "name": "新申请人", "employee_id": "E999",
+            "purpose": "重复申请", "duration": "1d", "servers": ["10.0.0.1"],
+        })
+        apps = logged_in_client.get("/api/applications").get_json()["applications"]
+        app_id = apps[0]["id"]
+
+        resp = logged_in_client.post(f"/api/applications/{app_id}/review", json={
+            "action": "approve", "servers": ["10.0.0.1"]
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert "已存在" in data["message"]
+        assert "server1" in data["message"] or "10.0.0.1" in data["message"]
+
+        # 原条目元数据未被静默改写
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        entry = next(e for e in saved["servers"][0]["whitelist"] if e["ip"] == "5.5.5.5")
+        assert entry["description"] == "旧描述-勿改"
+        assert entry["added_by"] == "previous-user"
+        assert entry["added_at"] == "2025-01-01 10:00:00"
+
+    def test_replace_application_locked_global_rejected(self, logged_in_client, tmp_config_file):
+        """全局白名单中锁定的旧 IP 不可被 type=replace 申请审批删除。"""
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["whitelist"] = [{
+            "ip": "141.66.66.66", "description": "site-self-loop",
+            "added_by": "admin", "added_at": "2025-01-01 10:00:00",
+            "locked": True,
+        }]
+        cfg["applications"] = [{
+            "id": "app-replace-locked",
+            "type": "replace",
+            "ip": "10.10.10.10",
+            "old_ip": "141.66.66.66",
+            "name": "x", "employee_id": "x", "purpose": "x",
+            "duration": "1d", "servers": ["10.0.0.1"],
+            "status": "pending", "approved_servers": [], "deployed": False,
+            "created_at": "2025-01-02 10:00:00",
+        }]
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+        resp = logged_in_client.post("/api/applications/app-replace-locked/review", json={
+            "action": "approve", "servers": ["10.0.0.1"]
+        })
+        assert resp.status_code == 403
+        assert "锁定" in resp.get_json()["message"]
+
+        # 旧 IP 未被删除，申请仍处于 pending
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        assert any(e["ip"] == "141.66.66.66" for e in saved["whitelist"])
+        assert saved["applications"][0]["status"] == "pending"
+
+    def test_replace_application_locked_server_entry_rejected(self, logged_in_client, tmp_config_file):
+        """服务器专属白名单中锁定的旧 IP 同样阻止 replace 审批。"""
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["servers"][0]["whitelist"] = [{
+            "ip": "203.0.113.5", "description": "critical",
+            "added_by": "admin", "added_at": "2025-01-01 10:00:00",
+            "locked": True,
+        }]
+        cfg["applications"] = [{
+            "id": "app-replace-srv-locked",
+            "type": "replace",
+            "ip": "10.10.10.10",
+            "old_ip": "203.0.113.5",
+            "name": "x", "employee_id": "x", "purpose": "x",
+            "duration": "1d", "servers": ["10.0.0.1"],
+            "status": "pending", "approved_servers": [], "deployed": False,
+            "created_at": "2025-01-02 10:00:00",
+        }]
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+        resp = logged_in_client.post("/api/applications/app-replace-srv-locked/review", json={
+            "action": "approve", "servers": ["10.0.0.1"]
+        })
+        assert resp.status_code == 403
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        assert saved["servers"][0]["whitelist"][0]["ip"] == "203.0.113.5"
+
 
 # ── /api/settings ─────────────────────────────────────────────────────────
 

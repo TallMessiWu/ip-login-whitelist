@@ -552,6 +552,29 @@ def api_applications_review(app_id):
 
     is_replace = app.get("type") == "replace"
 
+    # replace 模式：删除旧 IP 前先检查锁定状态，与 Guest 自助换 IP / 全局编辑/删除接口
+    # 的锁定保护保持一致，避免 locked 的关键 IP（如管理服务器自身）被绕过删除。
+    if is_replace:
+        old_ip = app.get("old_ip", "")
+        locked_scope = None
+        for entry in cfg.get("whitelist", []):
+            if entry["ip"] == old_ip and entry.get("locked"):
+                locked_scope = "全局"
+                break
+        if locked_scope is None:
+            for srv in cfg.get("servers", []):
+                for entry in srv.get("whitelist", []):
+                    if entry["ip"] == old_ip and entry.get("locked"):
+                        locked_scope = srv.get("name") or srv["host"]
+                        break
+                if locked_scope:
+                    break
+        if locked_scope:
+            return jsonify({
+                "success": False,
+                "message": f"{old_ip} 在 [{locked_scope}] 已被锁定，无法通过替换申请审批",
+            }), 403
+
     # 审核人可覆盖有效期
     raw_expire = data.get("expire_at")
     if raw_expire is None:
@@ -582,6 +605,10 @@ def api_applications_review(app_id):
     else:
         description = f"{name_part} {app.get('purpose', '')}".strip()
 
+    # 收集因 IP 已存在被跳过的服务器，让审核人知道审批"成功"但部分服务器未变更——
+    # 此时不会覆盖原条目的 description / expire_at / added_by，避免静默改写旧申请的元数据。
+    skipped_hosts: list[str] = []
+
     if is_replace:
         # 替换模式：移除旧 IP，添加新 IP
         old_ip = app.get("old_ip", "")
@@ -594,17 +621,21 @@ def api_applications_review(app_id):
         for srv in cfg["servers"]:
             if srv["host"] in final_servers:
                 wl = srv.setdefault("whitelist", [])
-                if not any(e["ip"] == app["ip"] for e in wl):
-                    entry = _make_ip_entry(app["ip"], description, expire_at, added_by=reviewer)
-                    wl.append(entry)
+                if any(e["ip"] == app["ip"] for e in wl):
+                    skipped_hosts.append(srv.get("name") or srv["host"])
+                    continue
+                entry = _make_ip_entry(app["ip"], description, expire_at, added_by=reviewer)
+                wl.append(entry)
     else:
         # 普通模式：添加 IP 到各服务器专属白名单
         for srv in cfg["servers"]:
             if srv["host"] in final_servers:
                 wl = srv.setdefault("whitelist", [])
-                if not any(e["ip"] == app["ip"] for e in wl):
-                    entry = _make_ip_entry(app["ip"], description, expire_at, added_by=reviewer)
-                    wl.append(entry)
+                if any(e["ip"] == app["ip"] for e in wl):
+                    skipped_hosts.append(srv.get("name") or srv["host"])
+                    continue
+                entry = _make_ip_entry(app["ip"], description, expire_at, added_by=reviewer)
+                wl.append(entry)
 
     app["status"] = "approved"
     app["approved_servers"] = final_servers
@@ -616,6 +647,8 @@ def api_applications_review(app_id):
     save_config(cfg)
 
     msg = f"已批准 {app['ip']} 替换 {app.get('old_ip', '')} ({len(final_servers)} 台服务器)" if is_replace else f"已批准 {app['ip']} 加入 {len(final_servers)} 台服务器白名单（待下发）"
+    if skipped_hosts:
+        msg += f"；{len(skipped_hosts)} 台因 IP 已存在未覆盖：{', '.join(skipped_hosts)}"
     return jsonify({"success": True, "message": msg})
 
 
