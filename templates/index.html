@@ -144,7 +144,7 @@
         </div>
 
         <!-- 列表 -->
-        <div id="wl-list" class="flex-1 divide-y divide-slate-50 overflow-auto max-h-80">
+        <div id="wl-list" class="flex-1 divide-y divide-slate-50 overflow-auto max-h-[32rem]">
           <div class="px-5 py-10 text-center text-slate-400">
             <i class="fas fa-circle-notch spin mr-1"></i> <span data-i18n="loading">加载中...</span>
           </div>
@@ -1724,6 +1724,9 @@
       }
 
       const filtered = applications.filter(a => a.status === appFilter);
+      if (appFilter === 'approved' || appFilter === 'rejected') {
+        filtered.sort((a, b) => (b.reviewed_at || '').localeCompare(a.reviewed_at || ''));
+      }
       if (!filtered.length) {
         const labels = { pending: t('review_no_pending'), approved: t('review_no_approved'), rejected: t('review_no_rejected') };
         el.innerHTML = `
