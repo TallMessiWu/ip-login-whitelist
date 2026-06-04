@@ -25,7 +25,7 @@
 | 替换 IP 并立即下发（无需审核） | `POST /api/guest/replace` → `api_guest_replace()` | L253 |
 | 自助记录列表（管理员） | `GET /api/self-service-log` → `api_self_service_log()` | L470 |
 
-逻辑：原地更新（保留 description/expire_at 等元数据，仅刷新 added_at/added_by="guest-self-service"），同步全局白名单与所有服务器专属白名单中匹配的旧 IP，立即下发到受影响的服务器，返回 `deploy_result` 给前端实时显示。无需管理员审核；隐式凭证 = 旧 IP 必须已在白名单中。
+逻辑：原地更新（保留 description/expire_at 等元数据，仅刷新 added_at/added_by="guest-self-service"），同步全局白名单与所有服务器专属白名单中匹配的旧 IP，立即下发到受影响的**启用中**服务器，返回 `deploy_result` 给前端实时显示。无需管理员审核；隐式凭证 = 旧 IP 必须已在白名单中。
 
 **存储分离**：自助替换记录写入独立的 `cfg["self_service_log"]`（不进 `applications`），避免被审核/批量下发流程误处理。记录字段：`id / old_ip / new_ip / description / expire_at / servers / deploy_results / success_count / total / all_success / created_at`。审核页通过"自助换 IP"筛选标签独立展示。
 
@@ -40,7 +40,7 @@
 | 下发已批准申请 | `POST /api/applications/deploy` → `api_applications_deploy()` | L437 |
 | 公开服务器列表 | `GET /api/servers-public` → `api_servers_public()` | L136 |
 
-审核流程：提交申请(含 IP/姓名/工号/目的/时长/目标服务器) → 管理员审核 → 批准后写入服务器专属白名单 → 手动 deploy 或等调度器下发。
+审核流程：提交申请(含 IP/姓名/工号/目的/时长/目标服务器) → 管理员审核 → 批准后写入服务器专属白名单 → 手动 deploy 或等调度器下发。公开服务器列表和申请提交仅接受启用的服务器（禁用的不展示不上报），审核批准的 `valid_hosts` 也排除禁用服务器。
 
 ## 四、白名单管理 API（L772-862）
 
@@ -60,6 +60,9 @@
 | 添加服务器 | `POST /api/servers` | L866 |
 | 删除服务器 | `DELETE /api/servers/<host>` | L894 |
 | 更新服务器（密码/代理/密钥） | `PATCH /api/servers/<host>` | L905 |
+| 启用/禁用服务器 | `POST /api/servers/<host>/toggle` body=`{enabled: bool}` | — |
+
+添加服务器时默认 `enabled: true`。`DELETE /api/servers/<host>` 删除启用中的服务器前先远端取消白名单（取消成功才删除，失败 502），已禁用的跳过远端直接删除。`POST …/toggle` 禁用：先远端取消白名单，成功才标记禁用，失败回滚保持启用（502）；启用：仅恢复 flag 标记，不自动下发。
 
 ## 六、服务器专属白名单 API（L925-1015）
 
@@ -87,7 +90,7 @@
 
 `/api/my-ip`：仅返回 HTTP 客户端 IP（X-Forwarded-For / remote_addr），**永不**触发出口探测——避免反向代理未注入 X-Forwarded-For 时把网站服务器自身 IP 当作用户 IP 返回给申请页面。返回 `{client_ip, is_local}`。
 
-`POST /api/deploy` 硬拦截（非 dry_run）：调用 `get_outgoing_ip` 探测管理机本地出口 IP；若不在 `cfg["whitelist"]`（**全局**白名单）中则返回 403 且不触发 `capture_run`，防止误下发使管理机失去对目标服务器的 SSH 访问能力。口径比前端 `/api/check-my-ip` 的合并白名单更严：只接受全局，强制管理机 IP 全局可达。
+`POST /api/deploy` 硬拦截（非 dry_run）：调用 `get_outgoing_ip` 探测管理机本地出口 IP；若不在 `cfg["whitelist"]`（**全局**白名单）中则返回 403 且不触发 `capture_run`，防止误下发使管理机失去对目标服务器的 SSH 访问能力。口径比前端 `/api/check-my-ip` 的合并白名单更严：只接受全局，强制管理机 IP 全局可达。**跳过已禁用服务器**——目标全禁用时返回 400 不下发。
 
 ## 八、后台调度器（L537-733）
 
@@ -103,8 +106,8 @@
 
 执行逻辑：
 1. 读原始 config（不触发 load_config 写盘），扫描过期条目
-2. 有过期 → `load_config()` 触发清除+写盘 → 对受影响服务器重下发
-3. 间隔可配置（默认 5 分钟）
+2. 有过期 → `load_config()` 触发清除+写盘 → 对受影响的**启用中**服务器重下发
+3. 间隔可配置（默认 5 分钟）；跳过已禁用服务器
 
 ## 九、前端模板
 

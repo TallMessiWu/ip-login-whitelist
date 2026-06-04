@@ -45,20 +45,22 @@
 - **双层白名单**：全局白名单 + 每台服务器可配专属白名单，下发时合并去重，过期条目不进入合并；添加全局 IP 时若各服务器专属白名单中存在同 IP，自动清除重复并继承其锁定状态（防"提升到全局"绕过锁定）
 - **时效管理**：`parse_expire()` 支持 `7d`/`24h`/`30m`（相对）、`2025-12-31`（绝对）、留空（永久）；`load_config()` 加载时自动清除过期条目
 - **条目锁定**：白名单条目可设 `locked: true`，锁定后无法被 Web 编辑/删除、Guest 自助换 IP 替换、或 `type=replace` 申请的审批删除；防止误把关键 IP（如管理服务器自身 IP）改掉导致回连失败
+- **服务器启用/禁用开关**：每台服务器 `enabled` 字段（缺省 true，兼容旧配置）。禁用 → 先远端取消白名单，成功才标记禁用，失败回滚保持启用（502）；启用 → 仅恢复 flag，不自动下发。禁用的服务器在手动下发、审核下发、审核批准、Guest 换 IP、自动调度下发、安全自检、申请页公开列表、申请提交中均被跳过。删除服务器时自动先取消白名单（已禁用的跳过远端直接删除），取消失败则拒绝删除（502）
 - **审批不覆盖既有条目**：审批申请时若目标服务器专属白名单已存在同 IP，跳过添加但保留原条目的 description/expire_at/added_by，响应中提示被跳过的服务器列表，避免新审批静默改写其他人申请的元数据
 - **代理链**：优先级 per-server `--proxy` > 全局 `settings --proxy` > 环境变量 `ALL_PROXY`，支持 socks5/socks4/http
-- **安全自检**：`/api/check-my-ip` 部署侧自检（含服务器自身出口探测）；`/api/my-ip` 仅返回 HTTP 真实客户端 IP（供 Guest/申请页填充，不做服务器出口探测）；`POST /api/deploy` 硬拦截：管理机本地出口 IP 必须存在于**全局**白名单中，否则 403 不下发
+- **安全自检**：`/api/check-my-ip` 部署侧自检（含服务器自身出口探测，跳过禁用服务器）；`/api/my-ip` 仅返回 HTTP 真实客户端 IP（供 Guest/申请页填充，不做服务器出口探测）；`POST /api/deploy` 硬拦截：管理机本地出口 IP 必须存在于**全局**白名单中，否则 403 不下发
+- **远端防火墙自启**：下发脚本检测到 firewalld 已安装但未运行时，先 `systemctl start/enable firewalld` + runtime 兜底放行 ssh，启动失败才回退 iptables；移除脚本的 `firewall-cmd --reload` 失败时 exit 1，防止取消失败被误判为成功
 - **认证**：Web 端 PBKDF2-HMAC-SHA256 密码哈希（200k 迭代，兼容旧 SHA-256 哈希），session 鉴权，登录速率限制（每 IP 60 秒 ≤10 次），公开路径白名单（`/login`、`/guest`、`/apply`）
 - **CSRF 防护**：所有状态变更请求（POST/PUT/PATCH/DELETE）必须携带 `X-CSRF-Token` 头，前端通过包装 `window.fetch` 自动注入；session cookie 设置 HttpOnly + SameSite=Lax
-- **国际化**：首次访问根据 `Accept-Language` 自动检测语言（中文 → 俄语 → 英文，无法检测默认中文），session 存储偏好；每页右上角语言切换按钮；`translations.py` 236 键三语字典，模板上下文注入 `lang`/`T`，前端 `t(key)` + `data-i18n` 属性翻译
-- **后台调度器**：可选启用的定时扫描 → 过期清除 → 自动重下发，间隔可配（默认 5 分钟）
+- **国际化**：首次访问根据 `Accept-Language` 自动检测语言（中文 → 俄语 → 英文，无法检测默认中文），session 存储偏好；每页右上角语言切换按钮；`translations.py` 三语字典，模板上下文注入 `lang`/`T`，前端 `t(key)` + `data-i18n` 属性翻译
+- **后台调度器**：可选启用的定时扫描 → 过期清除 → 自动重下发，间隔可配（默认 5 分钟）；跳过已禁用服务器
 
 ## 配置文件结构
 
 ```json
 {
   "whitelist": [{"ip": "", "description": "", "added_by": "", "added_at": "", "expire_at": null, "locked": false}],
-  "servers": [{"host": "", "port": 22, "user": "root", "key_file": "", "name": "", "password": "", "proxy": "", "whitelist": []}],
+  "servers": [{"host": "", "port": 22, "user": "root", "key_file": "", "name": "", "password": "", "proxy": "", "enabled": true, "whitelist": []}],
   "settings": {"ssh_port": 22, "persist_rules": true, "proxy": "", "auto_deploy": {"enabled": false, "interval_minutes": 5}, "secret_key": "", "auth": {"username": "admin", "password_hash": "sha256:..."}},
   "applications": [{"id": "", "ip": "", "name": "", "employee_id": "", "purpose": "", "duration": "", "status": "pending", "approved_servers": [], "deployed": false, ...}]
 }

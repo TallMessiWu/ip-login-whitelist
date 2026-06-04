@@ -817,17 +817,29 @@
           </div>`;
         }).join('');
 
+        const isEnabled = s.enabled !== false;
+        const disabledBadge = isEnabled ? '' :
+          `<span class="text-xs text-slate-500 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-ban mr-0.5"></i>${t('srv_disabled_badge')}</span>`;
+        const toggleBtn = `
+                  <button onclick="toggleServerEnabled('${escAttr(s.host)}', ${isEnabled ? 'false' : 'true'})" id="toggle-${escAttr(s.host)}"
+                    title="${isEnabled ? t('srv_disable_title') : t('srv_enable_title')}"
+                    class="${isEnabled ? 'text-green-500 hover:text-amber-600 hover:bg-amber-50' : 'text-slate-400 hover:text-green-600 hover:bg-green-50'} w-7 h-7 flex items-center justify-center rounded-md transition-all">
+                    <i class="fas ${isEnabled ? 'fa-toggle-on' : 'fa-toggle-off'} text-sm"></i>
+                  </button>`;
+
         return `
-          <div class="border-b border-slate-50 last:border-0 fade-in" id="srv-${escAttr(s.host)}">
+          <div class="border-b border-slate-50 last:border-0 fade-in ${isEnabled ? '' : 'bg-slate-50/60'}" id="srv-${escAttr(s.host)}">
             <div class="px-5 py-3 hover:bg-slate-50">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-2 min-w-0">
                   <i class="fas fa-circle text-slate-200 text-xs flex-shrink-0" id="dot-${escAttr(s.host)}"></i>
-                  <span class="font-medium text-slate-800 truncate">${escHtml(s.name || s.host)}</span>
+                  <span class="font-medium ${isEnabled ? 'text-slate-800' : 'text-slate-400'} truncate">${escHtml(s.name || s.host)}</span>
                   ${authTag}
                   ${swlBadge}
+                  ${disabledBadge}
                 </div>
                 <div class="flex items-center gap-1 ml-2 flex-shrink-0">
+                  ${toggleBtn}
                   <button onclick="toggleSrvWL('${escAttr(s.host)}')" title="${t('srv_exclusive_wl_title')}"
                     class="text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
                     <i class="fas fa-list-check text-xs"></i>
@@ -836,7 +848,7 @@
                     class="text-blue-400 hover:text-blue-600 hover:bg-blue-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
                     <i class="fas fa-key text-xs"></i>
                   </button>
-                  <button onclick="removeServer('${escAttr(s.host)}')" title="${t('delete')}"
+                  <button onclick="removeServer('${escAttr(s.host)}')" title="${t('delete')}" id="del-${escAttr(s.host)}"
                     class="text-red-400 hover:text-red-600 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
                     <i class="fas fa-trash-can text-xs"></i>
                   </button>
@@ -951,6 +963,10 @@
       const srv = (CFG.servers || []).find(s => s.host === host);
       const name = srv ? (srv.name || host) : host;
       if (!confirm(t('srv_confirm_remove', {name: name}))) return;
+      // 删除会先远端取消白名单（可能耗时），按钮转圈防止重复点击；失败时复原并保留服务器
+      const btn = document.getElementById('del-' + host);
+      let oldHtml = '';
+      if (btn) { oldHtml = btn.innerHTML; btn.innerHTML = '<i class="fas fa-circle-notch spin text-xs"></i>'; btn.disabled = true; }
       try {
         const res = await fetch(`/api/servers/${encodeURIComponent(host)}`, { method: 'DELETE' });
         const data = await res.json();
@@ -959,9 +975,40 @@
           await refreshAll();
         } else {
           toast(data.message, 'error');
+          if (btn) { btn.innerHTML = oldHtml; btn.disabled = false; }
         }
       } catch (e) {
         toast(t('operation_failed'), 'error');
+        if (btn) { btn.innerHTML = oldHtml; btn.disabled = false; }
+      }
+    }
+
+    async function toggleServerEnabled(host, enable) {
+      const srv = (CFG.servers || []).find(s => s.host === host);
+      const name = srv ? (srv.name || host) : host;
+      // 禁用会先远端取消白名单（敏感操作），需二次确认；启用仅恢复状态
+      if (!enable && !confirm(t('srv_confirm_disable', {name: name}))) return;
+
+      const btn = document.getElementById('toggle-' + host);
+      let oldHtml = '';
+      if (btn) { oldHtml = btn.innerHTML; btn.innerHTML = '<i class="fas fa-circle-notch spin text-sm"></i>'; btn.disabled = true; }
+      try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(host)}/toggle`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !!enable }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          toast(data.message || t(enable ? 'srv_enabled_msg' : 'srv_disabled_msg', {name: name}), 'success');
+          await refreshAll();   // 重渲染会替换该按钮，无需手动复原
+        } else {
+          toast(data.message || t('srv_disable_failed'), 'error');
+          if (btn) { btn.innerHTML = oldHtml; btn.disabled = false; }
+        }
+      } catch (e) {
+        toast(t('operation_failed'), 'error');
+        if (btn) { btn.innerHTML = oldHtml; btn.disabled = false; }
       }
     }
 
@@ -1142,9 +1189,10 @@
       const sel = document.getElementById('deploy-server');
       const prev = sel.value;
       sel.innerHTML = '<option value="">' + t('deploy_all') + '</option>' +
-        (CFG.servers || []).map(s =>
-          `<option value="${escAttr(s.host)}">${escHtml(s.name || s.host)}</option>`
-        ).join('');
+        (CFG.servers || []).map(s => {
+          const label = (s.name || s.host) + (s.enabled === false ? ' (' + t('srv_disabled_badge') + ')' : '');
+          return `<option value="${escAttr(s.host)}">${escHtml(label)}</option>`;
+        }).join('');
       if (prev) sel.value = prev;
     }
 
@@ -1764,9 +1812,12 @@
           const srvCheckboxes = (a.servers || []).map(h => {
             const s = serverNames.find(s => s.host === h);
             const label = s ? `${s.name || s.host} (${s.host})` : h;
-            return `<label class="flex items-center gap-2 py-1">
-              <input type="checkbox" value="${escAttr(h)}" class="app-srv-cb app-${escAttr(a.id)}-cb w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500" checked>
-              <span class="text-xs text-slate-600">${escHtml(label)}</span>
+            // 已禁用的服务器不可批准（不会被下发），勾选框置灰禁用并标注
+            const isDisabled = s && s.enabled === false;
+            const suffix = isDisabled ? ` · ${t('srv_disabled_badge')}` : '';
+            return `<label class="flex items-center gap-2 py-1 ${isDisabled ? 'opacity-50' : ''}">
+              <input type="checkbox" value="${escAttr(h)}" class="app-srv-cb app-${escAttr(a.id)}-cb w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500" ${isDisabled ? 'disabled' : 'checked'}>
+              <span class="text-xs text-slate-600">${escHtml(label)}${suffix}</span>
             </label>`;
           }).join('');
 

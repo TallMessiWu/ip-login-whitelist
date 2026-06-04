@@ -406,7 +406,8 @@ def cmd_server_add(args):
         "name": args.name or host,
         "password": args.password or "",
         "proxy": args.proxy or "",
-        "whitelist": []
+        "whitelist": [],
+        "enabled": True
     }
     config["servers"].append(server)
     save_config(config)
@@ -434,12 +435,13 @@ def cmd_server_list(args):
         print("服务器列表为空")
         return
 
-    print(f"\n{'名称':<20} {'地址':<20} {'端口':<8} {'用户':<15} {'密钥文件':<20} {'代理'}")
-    print("-" * 100)
+    print(f"\n{'名称':<20} {'地址':<20} {'端口':<8} {'用户':<15} {'密钥文件':<20} {'状态':<8} {'代理'}")
+    print("-" * 108)
     for s in servers:
         key_info = s.get('key_file') or ('(密码)' if s.get('password') else '(交互)')
         proxy_info = s.get('proxy') or '-'
-        print(f"{s.get('name',''):<20} {s['host']:<20} {s.get('port',22):<8} {s.get('user','root'):<15} {key_info:<20} {proxy_info}")
+        status = '启用' if s.get('enabled', True) else '禁用'
+        print(f"{s.get('name',''):<20} {s['host']:<20} {s.get('port',22):<8} {s.get('user','root'):<15} {key_info:<20} {status:<8} {proxy_info}")
     print(f"\n共 {len(servers)} 台服务器")
 
 
@@ -476,6 +478,25 @@ USE_IPTABLES=false
 if systemctl is-active --quiet firewalld 2>/dev/null; then
     USE_FIREWALLD=true
     echo "[检测] 发现 firewalld 正在运行，使用 firewalld rich-rule 模式"
+elif command -v firewall-cmd &>/dev/null && systemctl list-unit-files firewalld.service &>/dev/null; then
+    # firewalld 已安装但当前关闭：先启动并设为开机自启，再用 firewalld 模式下发，
+    # 避免回退到 iptables 后被随后自启的 firewalld 清空规则、造成白名单失效。
+    echo "[检测] firewalld 已安装但未运行，正在启动..."
+    systemctl start firewalld 2>/dev/null
+    systemctl enable firewalld 2>/dev/null
+    if systemctl is-active --quiet firewalld 2>/dev/null; then
+        USE_FIREWALLD=true
+        # 兜底：firewalld 刚启动，立即 runtime 放行 ssh，避免 start 后到本脚本 --reload
+        # 之间默认 zone 不含 ssh 而断连（reload 时会被精确白名单 rich-rule 覆盖）
+        firewall-cmd --add-service=ssh 2>/dev/null || true
+        echo "[OK] firewalld 已启动并设为开机自启，使用 firewalld rich-rule 模式"
+    elif command -v iptables &>/dev/null; then
+        USE_IPTABLES=true
+        echo "[WARN] firewalld 启动失败，回退到 iptables 模式"
+    else
+        echo "[ERROR] firewalld 启动失败且未找到 iptables，无法部署"
+        exit 1
+    fi
 elif command -v iptables &>/dev/null; then
     USE_IPTABLES=true
     echo "[检测] 使用 iptables 模式"
@@ -689,7 +710,7 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
     done < <(firewall-cmd --list-rich-rules 2>/dev/null | grep -E "port[ =]+[\\"\\']?{ssh_port}\\b")
     # 恢复默认 ssh service 开放
     firewall-cmd --permanent --add-service=ssh
-    firewall-cmd --reload
+    firewall-cmd --reload || {{ echo "[ERROR] firewall-cmd --reload 失败"; exit 1; }}
     echo "[OK] 已恢复默认 ssh 开放（所有 IP 均可登录）"
 else
     echo "[模式] iptables"
@@ -1060,6 +1081,17 @@ def cmd_deploy(args):
     whitelist = config["whitelist"]
 
     servers = get_target_servers(config, args.server)
+
+    # 跳过已禁用的服务器（禁用 = 已取消白名单并排除下发）
+    disabled = [s for s in servers if not s.get("enabled", True)]
+    if disabled:
+        names = ", ".join(s.get("name", s["host"]) for s in disabled)
+        print(f"[INFO] 跳过 {len(disabled)} 台已禁用服务器: {names}")
+    servers = [s for s in servers if s.get("enabled", True)]
+    if not servers:
+        print("[ERROR] 没有可下发的服务器（目标均已禁用）")
+        sys.exit(1)
+
     ssh_port = args.port or config["settings"].get("ssh_port", 22)
     persist = config["settings"].get("persist_rules", True)
 
@@ -1123,7 +1155,7 @@ def cmd_deploy(args):
 
     success_count = 0
     for server in servers:
-        merged = server_merged_map[id(server)]
+        merged = server_merged_map[server["host"]]
         script = generate_apply_script(merged, ssh_port, persist, audit=audit)
         if run_on_server(server, script, dry_run=args.dry_run, config=config):
             success_count += 1

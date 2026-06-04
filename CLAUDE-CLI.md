@@ -41,6 +41,8 @@ whitelist_manager
 | 查看列表 | `cmd_server_list()` | L341 |
 | 按 host/名称查找 | `_find_server()` | L159 |
 
+添加服务器时默认 `enabled: true`。`cmd_server_list()` 显示每台服务器的启用/禁用状态。
+
 ### 下发与运维
 
 | 功能 | 入口函数 | 行号 |
@@ -50,6 +52,8 @@ whitelist_manager
 | 撤销白名单 | `cmd_remove()` | L1048 |
 | 审计日志统计 | `cmd_audit_log()` | L1068 |
 | 全局设置 | `cmd_settings()` | L1077 |
+
+`cmd_deploy()` 自动跳过 `enabled=false` 的服务器并打印提示。
 
 ### 部署安全自检
 
@@ -66,6 +70,8 @@ whitelist_manager
 | `generate_audit_log_script()` | L513 |
 | `generate_status_script()` | L558 |
 | `generate_remove_script()` | L588 |
+
+`generate_apply_script` 额外处理 firewalld 已安装但未运行：先 `systemctl start/enable` + runtime 兜底放行 ssh，失败才回退 iptables。`generate_remove_script` 的 `firewall-cmd --reload` 失败时 exit 1，确保取消失败不被误判成功。
 
 ## 四、SSH 执行层
 

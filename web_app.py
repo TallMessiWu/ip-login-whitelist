@@ -213,11 +213,12 @@ def apply_page():
 def api_servers_public():
     """公开的服务器列表（不含认证信息），供申请页面使用。"""
     cfg = load_config(purge=False)
+    # 仅暴露启用中的服务器：禁用的服务器申请了也无法下发、审核也会跳过
     servers = [{
         "host": s["host"],
         "name": s.get("name", s["host"]),
         "port": s.get("port", 22),
-    } for s in cfg.get("servers", [])]
+    } for s in cfg.get("servers", []) if s.get("enabled", True)]
     return jsonify({"success": True, "servers": servers})
 
 
@@ -348,11 +349,12 @@ def api_guest_replace():
     if not found_global and not affected_server_hosts:
         return jsonify({"success": False, "message": f"未在白名单中找到 IP: {old_ip}"}), 404
 
-    # 全局 IP 影响所有服务器；否则仅影响包含该 IP 的服务器
+    # 全局 IP 影响所有服务器；否则仅影响包含该 IP 的服务器；已禁用的服务器一律跳过下发
     if found_global:
-        servers_to_deploy = list(cfg.get("servers", []))
+        servers_to_deploy = [s for s in cfg.get("servers", []) if s.get("enabled", True)]
     else:
-        servers_to_deploy = [s for s in cfg.get("servers", []) if s["host"] in affected_server_hosts]
+        servers_to_deploy = [s for s in cfg.get("servers", [])
+                             if s["host"] in affected_server_hosts and s.get("enabled", True)]
 
     # 立即持久化白名单变更
     save_config(cfg)
@@ -457,10 +459,10 @@ def api_apply():
         return jsonify({"success": False, "message": "请至少选择一台服务器"}), 400
 
     cfg = load_config()
-    all_hosts = {s["host"] for s in cfg.get("servers", [])}
+    all_hosts = {s["host"] for s in cfg.get("servers", []) if s.get("enabled", True)}
     for h in servers:
         if h not in all_hosts:
-            return jsonify({"success": False, "message": f"服务器不存在: {h}"}), 400
+            return jsonify({"success": False, "message": f"服务器不存在或已禁用: {h}"}), 400
 
     now = datetime.datetime.now()
     created_at = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -545,10 +547,10 @@ def api_applications_review(app_id):
     if not approved_servers:
         return jsonify({"success": False, "message": "请至少选择一台服务器批准"}), 400
 
-    valid_hosts = {s["host"] for s in cfg.get("servers", [])}
+    valid_hosts = {s["host"] for s in cfg.get("servers", []) if s.get("enabled", True)}
     final_servers = [h for h in approved_servers if h in app["servers"] and h in valid_hosts]
     if not final_servers:
-        return jsonify({"success": False, "message": "所选服务器均不在原始申请中或服务器已不存在"}), 400
+        return jsonify({"success": False, "message": "所选服务器均不在原始申请中、已禁用或已不存在"}), 400
 
     is_replace = app.get("type") == "replace"
 
@@ -668,9 +670,10 @@ def api_applications_deploy():
         for h in a.get("approved_servers", []):
             affected_hosts.add(h)
 
-    servers_to_deploy = [s for s in cfg.get("servers", []) if s["host"] in affected_hosts]
+    servers_to_deploy = [s for s in cfg.get("servers", [])
+                         if s["host"] in affected_hosts and s.get("enabled", True)]
     if not servers_to_deploy:
-        return jsonify({"success": False, "message": "没有找到需要下发的服务器"}), 400
+        return jsonify({"success": False, "message": "没有找到需要下发的服务器（可能均已禁用）"}), 400
 
     ssh_port = cfg["settings"].get("ssh_port", 22)
     persist = cfg["settings"].get("persist_rules", True)
@@ -826,6 +829,8 @@ def _scheduler_run_once():
             for server in cfg["servers"]:
                 if server["host"] not in affected_hosts:
                     continue
+                if not server.get("enabled", True):
+                    continue   # 跳过已禁用的服务器（禁用 = 已取消白名单并排除自动下发）
                 merged = get_merged_whitelist(server, cfg["whitelist"])
                 if not merged:
                     results.append({
@@ -1139,6 +1144,7 @@ def api_server_add():
         "password": data.get("password") or "",
         "proxy": data.get("proxy") or "",
         "whitelist": [],
+        "enabled": True,
     }
     cfg["servers"].append(server)
     save_config(cfg)
@@ -1150,12 +1156,27 @@ def api_server_add():
 @app.route("/api/servers/<path:host>", methods=["DELETE"])
 def api_server_remove(host):
     cfg = load_config()
-    before = len(cfg["servers"])
-    cfg["servers"] = [s for s in cfg["servers"] if s["host"] != host]
-    if len(cfg["servers"]) == before:
+    srv = _find_server(cfg, host)
+    if not srv:
         return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+
+    # 删除前先取消该服务器的白名单（恢复默认开放），取消成功才允许删除——
+    # 否则远端的 SSH 限制规则会成为无人管理的"孤儿规则"，可能把人锁在门外。
+    # 已禁用的服务器其白名单此前已被取消，直接删除，避免离线服务器永远删不掉。
+    if srv.get("enabled", True):
+        ssh_port = cfg["settings"].get("ssh_port", 22)
+        script = generate_remove_script(ssh_port)
+        ok, output = capture_run(srv, script, config=cfg)
+        if not ok:
+            return jsonify({
+                "success": False,
+                "message": "删除失败：远端取消白名单未成功，服务器未被删除，请检查连通性后重试",
+                "output": output,
+            }), 502
+
+    cfg["servers"] = [s for s in cfg["servers"] if s["host"] != srv["host"]]
     save_config(cfg)
-    return jsonify({"success": True, "message": f"已移除服务器 {host}"})
+    return jsonify({"success": True, "message": f"已取消白名单并移除服务器 {srv.get('name', srv['host'])}"})
 
 
 @app.route("/api/servers/<path:host>", methods=["PATCH"])
@@ -1176,6 +1197,52 @@ def api_server_update(host):
 
     save_config(cfg)
     return jsonify({"success": True, "message": "服务器信息已更新"})
+
+
+@app.route("/api/servers/<path:host>/toggle", methods=["POST"])
+def api_server_toggle(host):
+    """启用/禁用服务器。
+
+    - 禁用：先远端取消白名单（恢复默认开放），取消成功才标记为禁用；远端失败则回滚，
+      保持启用状态——避免"已标记禁用但远端规则仍在拦截"的不一致状态。
+    - 启用：仅恢复状态标志，不自动重新下发（下发为敏感操作，含本机 IP 锁定检查，
+      交由用户在下发区手动触发）。
+
+    禁用后该服务器会在手动下发、审核下发、Guest 换 IP、后台自动下发中被跳过。
+    """
+    data = request.json or {}
+    if "enabled" not in data:
+        return jsonify({"success": False, "message": "缺少 enabled 字段"}), 400
+    enabled = bool(data["enabled"])
+
+    cfg = load_config()
+    srv = _find_server(cfg, host)
+    if not srv:
+        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+
+    name = srv.get("name", srv["host"])
+
+    if enabled:
+        srv["enabled"] = True
+        save_config(cfg)
+        return jsonify({"success": True, "enabled": True,
+                        "message": f"已启用 {name}（白名单未自动下发，如需生效请手动下发）"})
+
+    # 禁用：先远端取消白名单，成功才标记禁用（失败回滚，保持启用）
+    ssh_port = cfg["settings"].get("ssh_port", 22)
+    script = generate_remove_script(ssh_port)
+    ok, output = capture_run(srv, script, config=cfg)
+    if not ok:
+        return jsonify({
+            "success": False,
+            "enabled": True,
+            "message": f"禁用失败：远端取消 {name} 的白名单未成功，已保持启用状态",
+            "output": output,
+        }), 502
+    srv["enabled"] = False
+    save_config(cfg)
+    return jsonify({"success": True, "enabled": False,
+                    "message": f"已禁用 {name} 并取消其白名单", "output": output})
 
 
 # ─── API：服务器专属白名单 ─────────────────────────────────────────────────────
@@ -1355,7 +1422,8 @@ def api_check_my_ip():
     """检测本机出口 IP 是否在目标服务器白名单中。"""
     cfg = load_config(purge=False)
     server_filter = request.args.get("server") or None
-    servers = cfg["servers"]
+    # 跳过已禁用的服务器：它们已恢复默认开放，本机 IP 必然可达，不应算作"被锁在门外"
+    servers = [s for s in cfg["servers"] if s.get("enabled", True)]
     if server_filter:
         servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
 
@@ -1402,6 +1470,11 @@ def api_deploy():
         servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
         if not servers:
             return jsonify({"success": False, "message": f"未找到服务器: {server_filter}"}), 404
+
+    # 跳过已禁用的服务器（禁用 = 已取消白名单并排除下发）
+    servers = [s for s in servers if s.get("enabled", True)]
+    if not servers:
+        return jsonify({"success": False, "message": "目标服务器均已禁用，未执行下发"}), 400
 
     # 预先计算每台服务器的合并白名单（全局 + 专属）
     global_whitelist = cfg["whitelist"]

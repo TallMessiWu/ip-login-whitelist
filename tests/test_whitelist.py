@@ -2011,6 +2011,296 @@ class TestDeployBlocksUnlistedManagementHost:
         assert resp.status_code == 200
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 服务器启用/禁用开关
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestServerToggle:
+    def test_disable_success_cancels_whitelist(self, logged_in_client, sample_config, monkeypatch):
+        """禁用：远端取消白名单成功后标记 enabled=False。"""
+        cap = mock.MagicMock(return_value=(True, "removed"))
+        monkeypatch.setattr(web_app, "capture_run", cap)
+        resp = logged_in_client.post("/api/servers/10.0.0.1/toggle", json={"enabled": False})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["enabled"] is False
+        assert cap.called  # 远端取消脚本被执行
+        cfg = wm.load_config(purge=False)
+        srv = next(s for s in cfg["servers"] if s["host"] == "10.0.0.1")
+        assert srv["enabled"] is False
+
+    def test_disable_failure_rolls_back(self, logged_in_client, sample_config, monkeypatch):
+        """禁用：远端取消失败则回滚，保持 enabled=True，返回 502。"""
+        monkeypatch.setattr(web_app, "capture_run", mock.MagicMock(return_value=(False, "ssh fail")))
+        resp = logged_in_client.post("/api/servers/10.0.0.1/toggle", json={"enabled": False})
+        assert resp.status_code == 502
+        assert resp.get_json()["success"] is False
+        cfg = wm.load_config(purge=False)
+        srv = next(s for s in cfg["servers"] if s["host"] == "10.0.0.1")
+        assert srv.get("enabled", True) is True  # 未被改为禁用
+
+    def test_enable_does_not_call_remote(self, logged_in_client, sample_config, monkeypatch):
+        """启用：仅恢复状态，不触发任何远端调用。"""
+        cap = mock.MagicMock(return_value=(True, ""))
+        monkeypatch.setattr(web_app, "capture_run", cap)
+        cfg = wm.load_config(purge=False)
+        cfg["servers"][0]["enabled"] = False
+        wm.save_config(cfg)
+        resp = logged_in_client.post("/api/servers/10.0.0.1/toggle", json={"enabled": True})
+        assert resp.status_code == 200
+        assert resp.get_json()["enabled"] is True
+        assert not cap.called  # 启用不应调用远端
+        cfg = wm.load_config(purge=False)
+        assert cfg["servers"][0]["enabled"] is True
+
+    def test_toggle_missing_field(self, logged_in_client, sample_config):
+        resp = logged_in_client.post("/api/servers/10.0.0.1/toggle", json={})
+        assert resp.status_code == 400
+
+    def test_toggle_server_not_found(self, logged_in_client, sample_config):
+        resp = logged_in_client.post("/api/servers/9.9.9.9/toggle", json={"enabled": False})
+        assert resp.status_code == 404
+
+
+class TestServerRemoveCancelsWhitelist:
+    def test_remove_enabled_cancels_then_deletes(self, logged_in_client, sample_config, monkeypatch):
+        """删除启用中的服务器：先远端取消白名单，成功后删除。"""
+        cap = mock.MagicMock(return_value=(True, "removed"))
+        monkeypatch.setattr(web_app, "capture_run", cap)
+        resp = logged_in_client.delete("/api/servers/10.0.0.1")
+        assert resp.status_code == 200
+        assert cap.called
+        cfg = wm.load_config(purge=False)
+        assert all(s["host"] != "10.0.0.1" for s in cfg["servers"])
+
+    def test_remove_blocked_when_cancel_fails(self, logged_in_client, sample_config, monkeypatch):
+        """删除启用中的服务器：远端取消失败则不删除，返回 502。"""
+        monkeypatch.setattr(web_app, "capture_run", mock.MagicMock(return_value=(False, "ssh fail")))
+        resp = logged_in_client.delete("/api/servers/10.0.0.1")
+        assert resp.status_code == 502
+        cfg = wm.load_config(purge=False)
+        assert any(s["host"] == "10.0.0.1" for s in cfg["servers"])  # 仍在
+
+    def test_remove_disabled_skips_remote(self, logged_in_client, sample_config, monkeypatch):
+        """删除已禁用的服务器：白名单此前已取消，直接删除不调用远端。"""
+        cap = mock.MagicMock(return_value=(True, ""))
+        monkeypatch.setattr(web_app, "capture_run", cap)
+        cfg = wm.load_config(purge=False)
+        cfg["servers"][0]["enabled"] = False
+        wm.save_config(cfg)
+        resp = logged_in_client.delete("/api/servers/10.0.0.1")
+        assert resp.status_code == 200
+        assert not cap.called
+        cfg = wm.load_config(purge=False)
+        assert all(s["host"] != "10.0.0.1" for s in cfg["servers"])
+
+
+class TestDeploySkipsDisabled:
+    def _two_server_config(self, tmp_config_file):
+        cfg = {
+            "whitelist": [{"ip": "192.168.1.0/24"}],
+            "servers": [
+                {"host": "10.0.0.1", "port": 22, "user": "root", "key_file": "",
+                 "name": "s1", "password": "", "whitelist": [], "enabled": True},
+                {"host": "10.0.0.2", "port": 22, "user": "root", "key_file": "",
+                 "name": "s2", "password": "", "whitelist": [], "enabled": False},
+            ],
+            "settings": {"ssh_port": 22, "persist_rules": True,
+                         "auto_deploy": {"enabled": False, "interval_minutes": 5}},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+    def test_deploy_all_skips_disabled(self, logged_in_client, tmp_config_file, monkeypatch):
+        self._two_server_config(tmp_config_file)
+        monkeypatch.setattr(web_app, "get_outgoing_ip", mock.MagicMock(return_value=None))
+        resp = logged_in_client.post("/api/deploy", json={})
+        assert resp.status_code == 200
+        hosts = {r["host"] for r in resp.get_json()["results"]}
+        assert "10.0.0.1" in hosts
+        assert "10.0.0.2" not in hosts  # 禁用服务器被跳过
+
+    def test_deploy_single_disabled_returns_error(self, logged_in_client, tmp_config_file):
+        self._two_server_config(tmp_config_file)
+        resp = logged_in_client.post("/api/deploy", json={"server": "10.0.0.2"})
+        assert resp.status_code == 400
+
+    def test_applications_deploy_skips_disabled(self, logged_in_client, tmp_config_file, monkeypatch):
+        """审核下发：批准到已禁用服务器的申请被跳过，不调用远端。"""
+        cfg = {
+            "whitelist": [],
+            "servers": [
+                {"host": "10.0.0.2", "port": 22, "user": "root", "key_file": "",
+                 "name": "s2", "password": "", "whitelist": [], "enabled": False},
+            ],
+            "applications": [
+                {"id": "app1", "ip": "7.7.7.7", "name": "N", "employee_id": "E",
+                 "purpose": "P", "duration": "1d", "servers": ["10.0.0.2"],
+                 "status": "approved", "approved_servers": ["10.0.0.2"], "deployed": False,
+                 "created_at": "2025-01-01 00:00:00"},
+            ],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        cap = mock.MagicMock(return_value=(True, ""))
+        monkeypatch.setattr(web_app, "capture_run", cap)
+        resp = logged_in_client.post("/api/applications/deploy", json={})
+        assert resp.status_code == 400  # 没有可下发的服务器（均已禁用）
+        assert not cap.called
+
+
+class TestReviewExcludesDisabled:
+    def test_review_approve_rejects_disabled_only(self, logged_in_client, tmp_config_file):
+        """审批：唯一申请的服务器已禁用时不可批准。"""
+        cfg = {
+            "whitelist": [],
+            "servers": [
+                {"host": "10.0.0.2", "port": 22, "user": "root", "key_file": "",
+                 "name": "s2", "password": "", "whitelist": [], "enabled": False},
+            ],
+            "applications": [
+                {"id": "app1", "ip": "7.7.7.7", "name": "N", "employee_id": "E",
+                 "purpose": "P", "duration": "1d", "servers": ["10.0.0.2"],
+                 "status": "pending", "approved_servers": [], "deployed": False,
+                 "created_at": "2025-01-01 00:00:00"},
+            ],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        resp = logged_in_client.post("/api/applications/app1/review",
+                                     json={"action": "approve", "servers": ["10.0.0.2"]})
+        assert resp.status_code == 400
+
+
+class TestServerEnabledField:
+    def test_cmd_server_add_sets_enabled(self, sample_config, tmp_config_file):
+        from argparse import Namespace
+        args = Namespace(host="10.0.0.5", port=22, user="root", key="", name="s5",
+                         password="", proxy="")
+        wm.cmd_server_add(args)
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        srv = next(s for s in cfg["servers"] if s["host"] == "10.0.0.5")
+        assert srv["enabled"] is True
+
+    def test_api_server_add_sets_enabled(self, logged_in_client, sample_config):
+        resp = logged_in_client.post("/api/servers", json={"host": "10.0.0.6", "name": "s6"})
+        assert resp.status_code == 200
+        assert resp.get_json()["server"]["enabled"] is True
+
+    def test_servers_public_excludes_disabled(self, web_client, tmp_config_file):
+        cfg = {
+            "whitelist": [],
+            "servers": [
+                {"host": "10.0.0.1", "name": "s1", "port": 22, "enabled": True, "whitelist": []},
+                {"host": "10.0.0.2", "name": "s2", "port": 22, "enabled": False, "whitelist": []},
+            ],
+            "settings": {"ssh_port": 22},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        resp = web_client.get("/api/servers-public")
+        hosts = {s["host"] for s in resp.get_json()["servers"]}
+        assert hosts == {"10.0.0.1"}
+
+    def test_cmd_deploy_skips_disabled(self, tmp_config_file, monkeypatch):
+        cfg = {
+            "whitelist": [{"ip": "1.2.3.4"}],
+            "servers": [
+                {"host": "10.0.0.1", "port": 22, "user": "root", "name": "s1",
+                 "password": "", "key_file": "", "whitelist": [], "enabled": False},
+            ],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        called = []
+        monkeypatch.setattr(wm, "run_on_server", lambda *a, **k: called.append(1) or True)
+        monkeypatch.setattr(wm, "get_outgoing_ip", lambda *a, **k: None)
+        args = mock.Mock(server=None, port=None, dry_run=True, audit=False, yes=True)
+        with pytest.raises(SystemExit):
+            wm.cmd_deploy(args)
+        assert not called  # 唯一服务器被禁用 → 直接退出，不下发
+
+    def test_check_my_ip_skips_disabled(self, logged_in_client, tmp_config_file, monkeypatch):
+        """/api/check-my-ip：locked_out_servers 只含启用且未覆盖的服务器，跳过禁用服务器。"""
+        cfg = {
+            "whitelist": [],  # 全局白名单不覆盖客户端 IP
+            "servers": [
+                {"host": "10.0.0.1", "port": 22, "user": "root", "key_file": "",
+                 "name": "s1", "password": "", "whitelist": [], "enabled": True},
+                {"host": "10.0.0.2", "port": 22, "user": "root", "key_file": "",
+                 "name": "s2", "password": "", "whitelist": [], "enabled": False},
+            ],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        # 测试环境 remote_addr 为 127.0.0.1，触发出口探测分支；mock 返回不在白名单的 IP
+        monkeypatch.setattr(web_app, "get_outgoing_ip", mock.MagicMock(return_value="8.8.8.8"))
+        resp = logged_in_client.get("/api/check-my-ip")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["client_ip"] == "8.8.8.8"
+        hosts = {s["host"] for s in data["locked_out_servers"]}
+        assert hosts == {"10.0.0.1"}  # 仅启用服务器被锁在门外，禁用的被跳过
+
+    def test_guest_replace_skips_disabled(self, web_client, tmp_config_file, monkeypatch):
+        """/api/guest/replace：禁用服务器的专属白名单换 IP 不触发下发。"""
+        cfg = {
+            "whitelist": [],
+            "servers": [
+                {"host": "10.0.0.2", "port": 22, "user": "root", "key_file": "",
+                 "name": "s2", "password": "", "enabled": False,
+                 "whitelist": [{"ip": "1.1.1.1", "added_by": "x", "added_at": ""}]},
+            ],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        cap = mock.MagicMock(return_value=(True, ""))
+        monkeypatch.setattr(web_app, "capture_run", cap)
+        resp = web_client.post("/api/guest/replace", json={"old_ip": "1.1.1.1", "new_ip": "2.2.2.2"})
+        assert resp.status_code == 200
+        assert not cap.called  # 受影响服务器已禁用 → 不下发
+        # 白名单本身仍已就地替换
+        cfg2 = wm.load_config(purge=False)
+        srv = next(s for s in cfg2["servers"] if s["host"] == "10.0.0.2")
+        assert srv["whitelist"][0]["ip"] == "2.2.2.2"
+
+
+class TestSchedulerSkipsDisabled:
+    def test_scheduler_skips_disabled_server(self, tmp_config_file, monkeypatch):
+        """后台自动下发：禁用服务器即便有过期条目也不下发。"""
+        past = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        cfg = {
+            "whitelist": [],
+            "servers": [
+                {"host": "10.0.0.2", "port": 22, "user": "root", "name": "s2",
+                 "password": "", "key_file": "", "enabled": False,
+                 "whitelist": [
+                     {"ip": "5.5.5.5", "expire_at": past, "added_by": "x", "added_at": ""},
+                     {"ip": "6.6.6.6", "added_by": "x", "added_at": ""},
+                 ]},
+            ],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        cap = mock.MagicMock(return_value=(True, ""))
+        monkeypatch.setattr(web_app, "capture_run", cap)
+        web_app._scheduler_run_once()
+        assert not cap.called
+
+
+class TestFirewalldAutoStart:
+    def test_apply_script_starts_stopped_firewalld(self):
+        """下发脚本：firewalld 已安装但未运行时应先启动并设为自启。"""
+        script = wm.generate_apply_script([{"ip": "1.1.1.1"}], 22, True)
+        assert "firewalld 已安装但未运行" in script
+        assert "systemctl start firewalld" in script
+        assert "systemctl enable firewalld" in script
+        # 仍保留 iptables 兜底分支
+        assert "回退到 iptables 模式" in script
+        # 安装检测：firewall-cmd 存在 + firewalld.service 单元存在
+        assert "command -v firewall-cmd" in script
+        assert "list-unit-files firewalld.service" in script
+
+
 def test_total_count():
     """确保测试总数合理（自检）。"""
     import inspect
