@@ -28,8 +28,10 @@ CONFIG_FILE = Path(__file__).parent / "config.json"
 # 进程内密码缓存，key = "user@host"，避免同一次运行反复提示
 _password_cache: dict = {}
 
-# 远端脚本执行/读输出超时（秒）。连接超时另由各路径的 30s 控制。
-EXEC_TIMEOUT = 30
+# 远端脚本执行/读输出超时（秒）。给慢服务器（firewalld reload / iptables 持久化 /
+# IP 条目多）留足余量，避免脚本实际已成功却因读输出超时被误判失败。
+# 注意：「慢」由并发下发 + 连接超时（各路径 30s）解决，本超时只兜底脚本真卡死。
+EXEC_TIMEOUT = 120
 
 DEFAULT_CONFIG = {
     "whitelist": [],

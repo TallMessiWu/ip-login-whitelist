@@ -88,7 +88,7 @@ whitelist_manager
 - paramiko：覆盖 `client._interactive_handler` 防止弹终端密码框；认证失败清除缓存重试一次，成功后回写 config
 - subprocess：密码通过 `SSH_ASKPASS` 环境变量 + 临时脚本静默传递；无密码时启用 `BatchMode=yes` 防止挂起
 
-超时：SSH 连接超时 30s（paramiko `timeout` / subprocess `ConnectTimeout` / 代理 socket）；脚本执行+读输出超时由模块常量 `EXEC_TIMEOUT=30` 统一控制（paramiko `stdout.channel.settimeout` 与 subprocess `subprocess.run(timeout=...)` 共用）。
+超时：SSH 连接超时 30s（paramiko `timeout` / subprocess `ConnectTimeout` / 代理 socket）；脚本执行+读输出超时由模块常量 `EXEC_TIMEOUT=120` 统一控制（paramiko `stdout.channel.settimeout` 与 subprocess `subprocess.run(timeout=...)` 共用），给慢服务器留足余量。
 
 ## 五、时效管理
 

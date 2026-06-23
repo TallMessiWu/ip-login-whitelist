@@ -48,7 +48,7 @@
 - **服务器启用/禁用开关**：每台服务器 `enabled` 字段（缺省 true，兼容旧配置）。禁用 → 先远端取消白名单，成功才标记禁用，失败回滚保持启用（502）；启用 → 仅恢复 flag，不自动下发。禁用的服务器在手动下发、审核下发、审核批准、Guest 换 IP、自动调度下发、安全自检、申请页公开列表、申请提交中均被跳过。删除服务器时自动先取消白名单（已禁用的跳过远端直接删除），取消失败则拒绝删除（502）
 - **审批不覆盖既有条目**：审批申请时若目标服务器专属白名单已存在同 IP，跳过添加但保留原条目的 description/expire_at/added_by，响应中提示被跳过的服务器列表，避免新审批静默改写其他人申请的元数据
 - **并发下发**：Web 端各下发/查询路径（手动下发、取消、状态、审计、自助换 IP、审核批量下发、调度器）通过 `_parallel_run` 用线程池并发执行，最大并行度 `DEPLOY_MAX_CONCURRENCY=10`，结果按入参顺序收集；超过上限的服务器排队。`capture_run` 用 `_ThreadLocalStdout` 线程隔离 stdout，避免并发时多台输出串台（替代全局 `redirect_stdout`，后者非线程安全）
-- **超时**：SSH 连接超时 30s；远端脚本执行/读输出超时由 `EXEC_TIMEOUT=30`（秒）统一控制（paramiko `settimeout` 与 subprocess `timeout` 共用）
+- **超时**：SSH 连接超时 30s；远端脚本执行/读输出超时由 `EXEC_TIMEOUT=120`（秒）统一控制（paramiko `settimeout` 与 subprocess `timeout` 共用）。「慢」由并发下发 + 连接超时解决，执行超时给足余量避免规则已落盘却因读输出超时被误判失败
 - **代理链**：优先级 per-server `--proxy` > 全局 `settings --proxy` > 环境变量 `ALL_PROXY`，支持 socks5/socks4/http
 - **安全自检**：`/api/check-my-ip` 部署侧自检（含服务器自身出口探测，跳过禁用服务器）；`/api/my-ip` 仅返回 HTTP 真实客户端 IP（供 Guest/申请页填充，不做服务器出口探测）；`POST /api/deploy` 硬拦截：管理机本地出口 IP 必须存在于**全局**白名单中，否则 403 不下发
 - **远端防火墙自启**：下发脚本检测到 firewalld 已安装但未运行时，先 `systemctl start/enable firewalld` + runtime 兜底放行 ssh，启动失败才回退 iptables；移除脚本的 `firewall-cmd --reload` 失败时 exit 1，防止取消失败被误判为成功
