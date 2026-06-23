@@ -28,6 +28,9 @@ CONFIG_FILE = Path(__file__).parent / "config.json"
 # 进程内密码缓存，key = "user@host"，避免同一次运行反复提示
 _password_cache: dict = {}
 
+# 远端脚本执行/读输出超时（秒）。连接超时另由各路径的 30s 控制。
+EXEC_TIMEOUT = 30
+
 DEFAULT_CONFIG = {
     "whitelist": [],
     "servers": [],
@@ -919,7 +922,7 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
         stdin.write(script)
         stdin.channel.shutdown_write()
 
-        stdout.channel.settimeout(120)  # 最长等待 120 秒，防止大日志输出卡死
+        stdout.channel.settimeout(EXEC_TIMEOUT)  # 最长等待 EXEC_TIMEOUT 秒，防止脚本卡死
         try:
             output = stdout.read().decode("utf-8", errors="replace")
         except Exception:
@@ -1000,7 +1003,7 @@ def _run_via_subprocess(host, port, user, key_file, password, script, proxy="") 
 
     try:
         result = subprocess.run(
-            cmd, input=script.encode(), capture_output=True, timeout=60, env=env
+            cmd, input=script.encode(), capture_output=True, timeout=EXEC_TIMEOUT, env=env
         )
         print(result.stdout.decode("utf-8", errors="replace"))
         if result.stderr.strip():

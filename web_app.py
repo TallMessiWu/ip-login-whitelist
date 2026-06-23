@@ -20,6 +20,7 @@ import datetime
 import getpass
 import argparse
 from contextlib import redirect_stdout
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from pathlib import Path
 
@@ -364,28 +365,26 @@ def api_guest_replace():
     persist = cfg["settings"].get("persist_rules", True)
     global_whitelist = cfg["whitelist"]
 
-    results = []
-    success_count = 0
-    for server in servers_to_deploy:
+    def _replace_deploy_one(server):
         merged = get_merged_whitelist(server, global_whitelist)
         if not merged:
-            results.append({
+            return {
                 "server": server.get("name", server["host"]),
                 "host": server["host"],
                 "success": False,
                 "output": "[SKIP] 白名单已全空，跳过自动下发",
-            })
-            continue
+            }
         script = generate_apply_script(merged, ssh_port, persist)
         ok, output = capture_run(server, script, config=cfg)
-        if ok:
-            success_count += 1
-        results.append({
+        return {
             "server": server.get("name", server["host"]),
             "host": server["host"],
             "success": ok,
             "output": output,
-        })
+        }
+
+    results = _parallel_run(servers_to_deploy, _replace_deploy_one)
+    success_count = sum(1 for r in results if r["success"])
 
     # 记录到独立的自助替换日志（不混入 applications，避免被审核/批量下发流程误处理）
     record_id = now.strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(4)
@@ -679,29 +678,26 @@ def api_applications_deploy():
     persist = cfg["settings"].get("persist_rules", True)
     global_whitelist = cfg["whitelist"]
 
-    results = []
-    success_count = 0
-    for server in servers_to_deploy:
+    def _app_deploy_one(server):
         merged = get_merged_whitelist(server, global_whitelist)
         if not merged:
-            results.append({
+            return {
                 "server": server.get("name", server["host"]),
                 "host": server["host"],
                 "success": False,
                 "output": "[SKIP] 白名单已全空，跳过自动下发",
-            })
-            continue
-
+            }
         script = generate_apply_script(merged, ssh_port, persist)
         ok, output = capture_run(server, script, config=cfg)
-        if ok:
-            success_count += 1
-        results.append({
+        return {
             "server": server.get("name", server["host"]),
             "host": server["host"],
             "success": ok,
             "output": output,
-        })
+        }
+
+    results = _parallel_run(servers_to_deploy, _app_deploy_one)
+    success_count = sum(1 for r in results if r["success"])
 
     # 仅标记所有目标服务器都成功部署的申请为已部署
     succeeded_hosts = {r["host"] for r in results if r["success"]}
@@ -824,33 +820,30 @@ def _scheduler_run_once():
             # ③ 对受影响的服务器重新下发
             ssh_port = cfg["settings"].get("ssh_port", 22)
             persist = cfg["settings"].get("persist_rules", True)
-            results = []
 
-            for server in cfg["servers"]:
-                if server["host"] not in affected_hosts:
-                    continue
-                if not server.get("enabled", True):
-                    continue   # 跳过已禁用的服务器（禁用 = 已取消白名单并排除自动下发）
+            # 仅对受影响且启用的服务器下发（禁用 = 已取消白名单并排除自动下发）
+            targets = [s for s in cfg["servers"]
+                       if s["host"] in affected_hosts and s.get("enabled", True)]
+
+            def _sched_deploy_one(server):
                 merged = get_merged_whitelist(server, cfg["whitelist"])
                 if not merged:
-                    results.append({
+                    return {
                         "server": server.get("name", server["host"]),
                         "host": server["host"],
                         "success": False,
                         "output": "[SKIP] 白名单已全空，跳过自动下发（防止锁死服务器）",
-                    })
-                    continue
-
+                    }
                 script = generate_apply_script(merged, ssh_port, persist)
                 ok, output = capture_run(server, script, config=cfg)
-                results.append({
+                return {
                     "server": server.get("name", server["host"]),
                     "host": server["host"],
                     "success": ok,
                     "output": output,
-                })
+                }
 
-            _sched["last_results"] = results
+            _sched["last_results"] = _parallel_run(targets, _sched_deploy_one)
 
         except Exception as exc:
             _sched["last_expired"] = []
@@ -951,9 +944,80 @@ def api_scheduler_patch():
 
 # ─── 工具函数 ──────────────────────────────────────────────────────────────────
 
+# 并发下发的最大并行度：超过的服务器排队，避免压垮代理 / 本机文件描述符。
+DEPLOY_MAX_CONCURRENCY = 10
+
+
+class _ThreadLocalStdout:
+    """线程隔离的 stdout 代理。
+
+    run_on_server 及其下游用 print 写 sys.stdout 输出执行日志；并发下发时
+    contextlib.redirect_stdout 会替换全局 sys.stdout 导致多线程互相串台。
+    本代理给每个线程一个独立 buffer：set_buffer 后该线程的写入只进入自己的
+    buffer，未设置的线程（含主线程日志）仍写真实 stdout。
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self._local = threading.local()
+
+    def _target(self):
+        return getattr(self._local, "buf", None) or self._real
+
+    def set_buffer(self, buf):
+        self._local.buf = buf
+
+    def clear_buffer(self):
+        self._local.buf = None
+
+    def write(self, s):
+        return self._target().write(s)
+
+    def flush(self):
+        target = self._target()
+        if hasattr(target, "flush"):
+            target.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _install_threadlocal_stdout():
+    """幂等地把 sys.stdout 包成线程隔离代理（重复调用不会二次包装）。"""
+    if not isinstance(sys.stdout, _ThreadLocalStdout):
+        sys.stdout = _ThreadLocalStdout(sys.stdout)
+
+
+_install_threadlocal_stdout()
+
+
+def _parallel_run(servers, work_fn):
+    """对每台服务器并发执行 work_fn，返回与 servers 入参同序的结果列表。"""
+    if not servers:
+        return []
+    workers = min(len(servers), DEPLOY_MAX_CONCURRENCY)
+    if workers <= 1:
+        return [work_fn(s) for s in servers]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="deploy") as ex:
+        return list(ex.map(work_fn, servers))   # ex.map 保持入参顺序
+
+
 def capture_run(server: dict, script: str, dry_run: bool = False, config: dict = None):
     """执行脚本并捕获输出，返回 (success: bool, output: str)"""
     buf = io.StringIO()
+    proxy = sys.stdout
+    if isinstance(proxy, _ThreadLocalStdout):
+        # 线程隔离捕获：并发下发时各线程互不串台
+        proxy.set_buffer(buf)
+        try:
+            result = run_on_server(server, script, dry_run=dry_run, config=config, interactive=False)
+        except Exception as e:
+            return False, f"[ERROR] 执行出错: {e}\n{buf.getvalue()}"
+        finally:
+            proxy.clear_buffer()
+        return result, buf.getvalue()
+
+    # 回退：未安装代理（如 CLI / 测试）时用全局 redirect_stdout，串行安全
     try:
         with redirect_stdout(buf):
             result = run_on_server(server, script, dry_run=dry_run, config=config, interactive=False)
@@ -1505,20 +1569,19 @@ def api_deploy():
     ssh_port = cfg["settings"].get("ssh_port", 22)
     persist = cfg["settings"].get("persist_rules", True)
 
-    results = []
-    success_count = 0
-    for server in servers:
+    def _deploy_one(server):
         merged = server_merged_map[server["host"]]
         script = generate_apply_script(merged, ssh_port, persist, audit=audit)
         ok, output = capture_run(server, script, dry_run=dry_run, config=cfg)
-        if ok:
-            success_count += 1
-        results.append({
+        return {
             "server": server.get("name", server["host"]),
             "host": server["host"],
             "success": ok,
             "output": output,
-        })
+        }
+
+    results = _parallel_run(servers, _deploy_one)
+    success_count = sum(1 for r in results if r["success"])
 
     return jsonify({
         "success": success_count > 0,
@@ -1550,18 +1613,17 @@ def api_remove():
     ssh_port = cfg["settings"].get("ssh_port", 22)
     script = generate_remove_script(ssh_port)
 
-    results = []
-    success_count = 0
-    for server in servers:
+    def _remove_one(server):
         ok, output = capture_run(server, script, dry_run=dry_run, config=cfg)
-        if ok:
-            success_count += 1
-        results.append({
+        return {
             "server": server.get("name", server["host"]),
             "host": server["host"],
             "success": ok,
             "output": output,
-        })
+        }
+
+    results = _parallel_run(servers, _remove_one)
+    success_count = sum(1 for r in results if r["success"])
 
     return jsonify({
         "success": success_count > 0,
@@ -1587,15 +1649,16 @@ def api_status():
     ssh_port = cfg["settings"].get("ssh_port", 22)
     script = generate_status_script(ssh_port)
 
-    results = []
-    for server in servers:
+    def _status_one(server):
         ok, output = capture_run(server, script, config=cfg)
-        results.append({
+        return {
             "server": server.get("name", server["host"]),
             "host": server["host"],
             "success": ok,
             "output": output,
-        })
+        }
+
+    results = _parallel_run(servers, _status_one)
 
     return jsonify({"success": True, "results": results})
 
@@ -1617,15 +1680,16 @@ def api_audit_log():
     ssh_port = cfg["settings"].get("ssh_port", 22)
     script = generate_audit_log_script(ssh_port, lines)
 
-    results = []
-    for server in servers:
+    def _audit_one(server):
         ok, output = capture_run(server, script, config=cfg)
-        results.append({
+        return {
             "server": server.get("name", server["host"]),
             "host": server["host"],
             "success": ok,
             "output": output,
-        })
+        }
+
+    results = _parallel_run(servers, _audit_one)
 
     return jsonify({"success": True, "results": results})
 

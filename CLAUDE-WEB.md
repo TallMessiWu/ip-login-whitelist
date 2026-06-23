@@ -92,6 +92,8 @@
 
 `POST /api/deploy` 硬拦截（非 dry_run）：调用 `get_outgoing_ip` 探测管理机本地出口 IP；若不在 `cfg["whitelist"]`（**全局**白名单）中则返回 403 且不触发 `capture_run`，防止误下发使管理机失去对目标服务器的 SSH 访问能力。口径比前端 `/api/check-my-ip` 的合并白名单更严：只接受全局，强制管理机 IP 全局可达。**跳过已禁用服务器**——目标全禁用时返回 400 不下发。
 
+**并发执行**：`/api/deploy`、`/api/remove`、`/api/status`、`/api/audit-log`、Guest 自助换 IP、`/api/applications/deploy`、调度器，对多台服务器的 `capture_run` 均通过 `_parallel_run(servers, work_fn)` 用线程池并发，最大并行度 `DEPLOY_MAX_CONCURRENCY=10`，`ex.map` 保证结果与入参同序；单台或空列表走串行分支。每个路由把原 per-server 循环体抽成 `work_fn(server)` 闭包返回结果 dict，循环外 `success_count = sum(...)`。`/api/deploy` 的管理机本地 IP 硬拦截在并发前串行执行；过滤（禁用/不受影响）也在并发前完成。`capture_run` 用 `_ThreadLocalStdout`（模块加载时 `_install_threadlocal_stdout()` 幂等安装）给每线程独立 buffer 捕获 `run_on_server` 的 print 输出，避免并发串台；未安装代理时回退全局 `redirect_stdout`。
+
 ## 八、后台调度器（L537-733）
 
 | 功能 | 位置 | 行号 |

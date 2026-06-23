@@ -2301,6 +2301,95 @@ class TestFirewalldAutoStart:
         assert "list-unit-files firewalld.service" in script
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 并发下发：_parallel_run 保序 + capture_run 输出隔离
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestParallelRun:
+    def test_empty_returns_empty(self):
+        assert web_app._parallel_run([], lambda s: s) == []
+
+    def test_single_runs_sequentially(self):
+        # 只有 1 台时走串行分支，结果不变
+        assert web_app._parallel_run([{"host": "a"}], lambda s: s["host"]) == ["a"]
+
+    def test_preserves_input_order_under_concurrency(self):
+        """并发执行但结果必须与入参同序，success_count 正确。"""
+        import time
+        servers = [{"host": f"h{i}"} for i in range(7)]
+
+        def work(s):
+            idx = int(s["host"][1:])
+            # 反向延迟：靠后的先返回，验证 ex.map 仍按入参顺序收集
+            time.sleep((7 - idx) * 0.005)
+            return {"host": s["host"], "success": idx % 2 == 0}
+
+        results = web_app._parallel_run(servers, work)
+        assert [r["host"] for r in results] == [f"h{i}" for i in range(7)]
+        assert sum(1 for r in results if r["success"]) == 4  # h0/h2/h4/h6
+
+    def test_respects_concurrency_cap(self, monkeypatch):
+        """并发度不超过 DEPLOY_MAX_CONCURRENCY，多出的服务器排队。"""
+        import threading
+        import time
+        monkeypatch.setattr(web_app, "DEPLOY_MAX_CONCURRENCY", 3)
+        active = []
+        peak = [0]
+        lock = threading.Lock()
+
+        def work(s):
+            with lock:
+                active.append(s)
+                peak[0] = max(peak[0], len(active))
+            time.sleep(0.01)
+            with lock:
+                active.remove(s)
+            return s
+
+        servers = [{"host": f"h{i}"} for i in range(10)]
+        web_app._parallel_run(servers, work)
+        assert peak[0] <= 3
+
+
+class TestCaptureRunIsolation:
+    def test_concurrent_capture_does_not_cross_talk(self, monkeypatch):
+        """两台服务器并发下发时，各自的 stdout 输出不互相串台。"""
+        import threading
+        import time
+
+        # pytest 会替换 sys.stdout，需在测试内重新安装线程隔离代理
+        proxy = web_app._ThreadLocalStdout(sys.stdout)
+        monkeypatch.setattr(sys, "stdout", proxy)
+
+        def fake_run(server, script, dry_run=False, config=None, interactive=True):
+            tag = server["host"]
+            for i in range(40):
+                print(f"{tag}-{i}")
+                time.sleep(0.0005)  # 强制线程交错
+            return True
+
+        monkeypatch.setattr(web_app, "run_on_server", fake_run)
+
+        results = {}
+
+        def run(host):
+            ok, output = web_app.capture_run({"host": host}, "script", config={})
+            results[host] = (ok, output)
+
+        t1 = threading.Thread(target=run, args=("AAA",))
+        t2 = threading.Thread(target=run, args=("BBB",))
+        t1.start(); t2.start(); t1.join(); t2.join()
+
+        ok_a, out_a = results["AAA"]
+        ok_b, out_b = results["BBB"]
+        assert ok_a and ok_b
+        # 各自缓冲区只含自己的标记，无对方串入
+        assert "AAA-0" in out_a and "BBB" not in out_a
+        assert "BBB-0" in out_b and "AAA" not in out_b
+        assert out_a.count("AAA-") == 40
+        assert out_b.count("BBB-") == 40
+
+
 def test_total_count():
     """确保测试总数合理（自检）。"""
     import inspect
