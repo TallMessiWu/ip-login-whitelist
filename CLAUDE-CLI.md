@@ -90,6 +90,8 @@ whitelist_manager
 
 超时：SSH 连接超时 30s（paramiko `timeout` / subprocess `ConnectTimeout` / 代理 socket）；脚本执行+读输出超时由模块常量 `EXEC_TIMEOUT=120` 统一控制（paramiko `stdout.channel.settimeout` 与 subprocess `subprocess.run(timeout=...)` 共用），给慢服务器留足余量。
 
+失败原因呈现：所有失败分支统一打印 `[FAIL] <host> …：<原因>`（连接/认证/执行超时/退出码非 0），原因可读且会进入 `capture_run` 捕获的输出供 Web 展示。`_friendly_ssh_error()` 把底层 socket/paramiko 异常翻译成中文（连接被拒绝/超时/网络不可达/主机名无法解析/认证失败，附原始信息）；退出码非 0 时用远端 stderr（无则 `_tail_lines()` 取输出末尾几行）作为原因；执行超时明确标注「执行超时（>EXEC_TIMEOUT）」并提示用「查看状态」确认规则是否已生效（区别于连接超时）。
+
 ## 五、时效管理
 
 | 函数 | 行号 |

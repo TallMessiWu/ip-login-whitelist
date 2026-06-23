@@ -776,6 +776,47 @@ class TestRunOnServer:
             )
             assert ok is False
 
+    def test_subprocess_failure_surfaces_stderr(self, capsys):
+        """退出码非 0 时，远端 stderr 必须出现在输出里作为失败原因。"""
+        with mock.patch.object(subprocess, "run") as mock_run:
+            mock_run.return_value = mock.Mock(
+                returncode=1, stdout=b"", stderr=b"iptables: command not found\n")
+            ok = wm._run_via_subprocess("10.0.0.1", 22, "root", "", "", "x", "")
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "[FAIL]" in out and "退出码 1" in out
+        assert "iptables: command not found" in out
+
+    def test_subprocess_timeout_labeled_as_execution(self, capsys):
+        """执行超时必须明确标注为「执行超时」，不再误标为「连接超时」。"""
+        with mock.patch.object(subprocess, "run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired("ssh", wm.EXEC_TIMEOUT)
+            ok = wm._run_via_subprocess("10.0.0.1", 22, "root", "", "", "x", "")
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "执行超时" in out and "查看状态" in out
+        assert "连接 10.0.0.1 超时" not in out  # 旧的误导文案已移除
+
+    def test_paramiko_connection_failure_prints_reason(self, capsys):
+        """连接失败要打印可读原因（友好翻译），而非裸异常。"""
+        pmock = mock.MagicMock()
+
+        class FakeAuthException(Exception):
+            pass
+        pmock.AuthenticationException = FakeAuthException
+        mock_client = mock.MagicMock()
+        mock_client.connect.side_effect = Exception("Connection refused")
+        pmock.SSHClient.return_value = mock_client
+        pmock.AutoAddPolicy = mock.MagicMock()
+
+        server_with_pw = {**self.SERVER, "password": "x"}
+        with mock.patch.dict(sys.modules, {"paramiko": pmock}):
+            ok = wm.run_on_server(server_with_pw, "echo test", config={}, interactive=False)
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "[FAIL]" in out and "连接失败" in out
+        assert "连接被拒绝" in out  # 友好翻译命中
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # _proxy_to_nc_command

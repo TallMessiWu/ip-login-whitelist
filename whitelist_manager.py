@@ -732,6 +732,29 @@ echo "=== 白名单已移除 ==="
 
 # ─── SSH 远程执行 ─────────────────────────────────────────────────────────────
 
+def _tail_lines(text: str, n: int = 8) -> str:
+    """取文本最后 n 行非空内容；远端脚本未走 stderr 时用它提取报错线索。"""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines[-n:])
+
+
+def _friendly_ssh_error(exc) -> str:
+    """把底层 SSH/socket 异常翻译成可读的中文原因（附原始信息便于排查）。"""
+    msg = str(exc).strip()
+    low = msg.lower()
+    if "timed out" in low or isinstance(exc, TimeoutError):
+        return f"连接超时（30s 内未建立 SSH 连接）：检查主机可达性 / 端口 / 防火墙 / 代理。原始：{msg or type(exc).__name__}"
+    if "refused" in low:
+        return f"连接被拒绝：目标 SSH 端口未开放或服务未运行。原始：{msg}"
+    if "no route to host" in low or "unreachable" in low:
+        return f"网络不可达：检查路由 / 代理 / 目标是否在线。原始：{msg}"
+    if "getaddrinfo" in low or "name or service not known" in low or "nodename" in low:
+        return f"主机名无法解析：检查 host 配置或 DNS。原始：{msg}"
+    if "authentication" in low:
+        return f"SSH 认证失败：密码或密钥错误。原始：{msg}"
+    return msg or type(exc).__name__
+
+
 def run_on_server(server: dict, script: str, dry_run: bool = False, config: dict = None, interactive: bool = True) -> bool:
     host = server["host"]
     port = server.get("port", 22)
@@ -887,12 +910,13 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
             client.connect(**connect_kwargs)
             break
         except paramiko.AuthenticationException:
-            print(f"[ERROR] {host} 认证失败，密码错误")
             if not needs_password:
+                print(f"[FAIL] {host} SSH 认证失败：密钥被拒绝（检查 key_file 是否匹配目标账户）")
                 return False
+            print(f"[ERROR] {host} 认证失败：密码错误")
             _password_cache.pop(cache_key, None)
             if attempt == 1 or not interactive:
-                print(f"[ERROR] {host} 认证仍然失败，放弃连接")
+                print(f"[FAIL] {host} SSH 认证失败：密码错误，放弃连接")
                 return False
             new_pwd = getpass.getpass(f"  请重新输入 {user}@{host} 的密码: ")
             _password_cache[cache_key] = new_pwd
@@ -903,7 +927,7 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client._interactive_handler = _kbd_handler  # type: ignore[attr-defined]
         except Exception as e:
-            print(f"[ERROR] 连接 {host} 失败: {e}")
+            print(f"[FAIL] {host} 连接失败：{_friendly_ssh_error(e)}")
             return False
 
     # 认证成功且密码是重新输入的，回写到 config.json
@@ -928,9 +952,16 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
         try:
             output = stdout.read().decode("utf-8", errors="replace")
         except Exception:
-            output = "[WARN] 读取输出超时，脚本可能仍在执行\n"
+            # 读输出超时：脚本运行超过 EXEC_TIMEOUT 仍未返回。此时不再读 stderr /
+            # 等退出码（同一 channel 会再次阻塞），直接给出明确原因后返回。
+            print(f"[FAIL] {host} 执行超时：远端脚本运行超过 {EXEC_TIMEOUT}s 仍未返回。"
+                  f"规则可能已部分/全部生效，请用「查看状态」确认；服务器较慢可调大 EXEC_TIMEOUT。")
+            return False
 
-        err_output = stderr.read().decode("utf-8", errors="replace")
+        try:
+            err_output = stderr.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_output = ""
         print(output)
         if err_output.strip():
             print(f"[STDERR] {err_output}")
@@ -939,11 +970,11 @@ def _run_via_paramiko(host, port, user, key_file, password, script, proxy="", in
         if exit_code == 0:
             print(f"[OK] {host} 执行成功")
             return True
-        else:
-            print(f"[ERROR] {host} 执行失败，退出码: {exit_code}")
-            return False
+        reason = err_output.strip() or _tail_lines(output) or "无错误输出（远端脚本未打印原因）"
+        print(f"[FAIL] {host} 远端脚本失败，退出码 {exit_code}。原因：{reason}")
+        return False
     except Exception as e:
-        print(f"[ERROR] {host} 执行脚本失败: {e}")
+        print(f"[FAIL] {host} 执行脚本异常：{_friendly_ssh_error(e)}")
         return False
     finally:
         client.close()
@@ -1007,21 +1038,26 @@ def _run_via_subprocess(host, port, user, key_file, password, script, proxy="") 
         result = subprocess.run(
             cmd, input=script.encode(), capture_output=True, timeout=EXEC_TIMEOUT, env=env
         )
-        print(result.stdout.decode("utf-8", errors="replace"))
-        if result.stderr.strip():
-            print(f"[STDERR] {result.stderr.decode('utf-8', errors='replace')}")
+        out_text = result.stdout.decode("utf-8", errors="replace")
+        err_text = result.stderr.decode("utf-8", errors="replace")
+        print(out_text)
+        if err_text.strip():
+            print(f"[STDERR] {err_text}")
 
         if result.returncode == 0:
             print(f"[OK] {host} 执行成功")
             return True
-        else:
-            print(f"[ERROR] {host} 执行失败，退出码: {result.returncode}")
-            return False
+        # ssh 自身的连接/认证错误（如 Connection refused、Permission denied）也走这里，
+        # 其原因在 stderr 中，直接呈现给用户。
+        reason = err_text.strip() or _tail_lines(out_text) or "无错误输出（远端脚本未打印原因）"
+        print(f"[FAIL] {host} 远端脚本失败，退出码 {result.returncode}。原因：{reason}")
+        return False
     except subprocess.TimeoutExpired:
-        print(f"[ERROR] 连接 {host} 超时")
+        print(f"[FAIL] {host} 执行超时：远端脚本运行超过 {EXEC_TIMEOUT}s 仍未返回。"
+              f"规则可能已部分/全部生效，请用「查看状态」确认；服务器较慢可调大 EXEC_TIMEOUT。")
         return False
     except Exception as e:
-        print(f"[ERROR] 执行失败: {e}")
+        print(f"[FAIL] {host} 执行失败：{_friendly_ssh_error(e)}")
         return False
     finally:
         if askpass_file and os.path.exists(askpass_file):
