@@ -276,6 +276,11 @@
           class="px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors">
           <i class="fas fa-rotate text-xs mr-1"></i><span data-i18n="review_self_service">自助换 IP 记录</span> <span id="self-service-count" class="ml-1 opacity-70">0</span>
         </button>
+        <button onclick="toggleSortDir()" id="app-sort-btn"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 transition-colors">
+          <i id="app-sort-icon" class="fas fa-arrow-down-wide-short"></i>
+          <span id="app-sort-label" data-i18n="review_sort_desc">时间降序</span>
+        </button>
         <div class="flex-1"></div>
         <button onclick="deployApproved()" id="review-deploy-btn"
           class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled>
@@ -1673,6 +1678,28 @@
     let applications = [];
     let selfServiceRecords = [];
 
+    // 各筛选项的默认时间排序方向（保持现有默认顺序不变）
+    const sortDefaults = { pending: 'asc', approved: 'desc', rejected: 'desc', 'self-service': 'desc' };
+    let sortDir = { ...sortDefaults };
+
+    function toggleSortDir() {
+      sortDir[appFilter] = sortDir[appFilter] === 'asc' ? 'desc' : 'asc';
+      updateSortBtn();
+      renderApplications();
+    }
+
+    // 按钮图标/文字与当前筛选项的排序方向同步
+    function updateSortBtn() {
+      const dir = sortDir[appFilter] || 'desc';
+      const icon = document.getElementById('app-sort-icon');
+      const label = document.getElementById('app-sort-label');
+      if (!icon || !label) return;
+      const key = dir === 'asc' ? 'review_sort_asc' : 'review_sort_desc';
+      icon.className = 'fas ' + (dir === 'asc' ? 'fa-arrow-up-wide-short' : 'fa-arrow-down-wide-short');
+      label.setAttribute('data-i18n', key);
+      label.textContent = t(key);
+    }
+
     function switchTab(tab) {
       currentTab = tab;
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -1750,11 +1777,13 @@
           }
         }
       });
+      updateSortBtn();
       renderApplications();
     }
 
     function renderApplications() {
       const el = document.getElementById('app-list');
+      updateSortBtn();
 
       const undeployed = applications.filter(a => a.status === 'approved' && !a.deployed);
       const deployBtn = document.getElementById('review-deploy-btn');
@@ -1772,9 +1801,12 @@
       }
 
       const filtered = applications.filter(a => a.status === appFilter);
-      if (appFilter === 'approved' || appFilter === 'rejected') {
-        filtered.sort((a, b) => (b.reviewed_at || '').localeCompare(a.reviewed_at || ''));
-      }
+      const timeKey = appFilter === 'pending' ? 'created_at' : 'reviewed_at';
+      const dir = sortDir[appFilter] || 'desc';
+      filtered.sort((a, b) => {
+        const cmp = (a[timeKey] || '').localeCompare(b[timeKey] || '');
+        return dir === 'asc' ? cmp : -cmp;
+      });
       if (!filtered.length) {
         const labels = { pending: t('review_no_pending'), approved: t('review_no_approved'), rejected: t('review_no_rejected') };
         el.innerHTML = `
@@ -1954,7 +1986,14 @@
       const serverDict = {};
       (CFG.servers || []).forEach(s => { serverDict[s.host] = s; });
 
-      el.innerHTML = selfServiceRecords.map(r => {
+      // 后端已按最新优先返回；按当前方向重排（默认降序即最新优先，与原行为一致）
+      const dir = sortDir['self-service'] || 'desc';
+      const records = [...selfServiceRecords].sort((a, b) => {
+        const cmp = (a.created_at || '').localeCompare(b.created_at || '');
+        return dir === 'asc' ? cmp : -cmp;
+      });
+
+      el.innerHTML = records.map(r => {
         const expireText = r.expire_at ? formatExpireLabel(r.expire_at) : t('permanent');
         const deployBadge = r.total === 0
           ? '<span class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-xs font-medium">' + t('review_no_deploy_needed') + '</span>'
