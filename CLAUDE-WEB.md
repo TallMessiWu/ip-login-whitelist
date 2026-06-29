@@ -44,6 +44,8 @@
 
 **申请时长上限**：`/apply` 时长下拉仅 1d/3d/7d/14d（最长 2 周，已移除 30d/90d/自定义日期）。`api_apply()` 后端硬拦截：用 `parse_expire(duration)` 算出绝对到期时间，超过 `now + 14 天`（含 1 分钟容差）或为永久(`None`)的申请返回 400——防止绕过前端直接提交超长时长。相对时长（`Nd/Nh/Nm`）仍不预存 `expire_at`，审批时从审批时刻起算；绝对日期直接存入。更长时效由审核员批准后在管理端手动延长。
 
+**超期未审批自动拒绝**：`_auto_reject_stale_applications(cfg)` 把 `created_at` 早于 `now - PENDING_AUTO_REJECT_DAYS`（默认 7 天）且仍为 `pending` 的申请置为 `rejected`，打 `auto_rejected=True` + `reviewed_by="system"`（与管理员手动拒绝区分；`created_at` 无法解析的跳过）。读时惰性触发：`api_applications_list()` 每次拉取先执行、有变更才回写；`_scheduler_run_once()` 也在开头独立执行一次（不依赖是否有过期白名单）。前端「已拒绝」卡片对 `auto_rejected` 显示灰色「超时自动拒绝」标签（i18n key `review_auto_rejected`），且不展示 `system` 这个哨兵审核人。
+
 ## 四、白名单管理 API（L772-862）
 
 | 功能 | 路由 | 行号 |
@@ -109,6 +111,7 @@
 | 启停/修改 API | `PATCH /api/scheduler` | L703 |
 
 执行逻辑：
+0. 先独立执行 `_auto_reject_stale_applications()`（兜底：超期未审批 pending 申请自动拒绝，不依赖是否有过期白名单），有变更则回写
 1. 读原始 config（不触发 load_config 写盘），扫描过期条目
 2. 有过期 → `load_config()` 触发清除+写盘 → 对受影响的**启用中**服务器重下发
 3. 间隔可配置（默认 5 分钟）；跳过已禁用服务器

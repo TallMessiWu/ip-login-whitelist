@@ -2096,6 +2096,9 @@
                     <span class="text-sm text-slate-400">(${escHtml(a.employee_id || '—')})</span>
                     <span class="px-1.5 py-0.5 rounded-full ${statusColor} text-xs font-medium">${statusLabel}</span>
                     ${deployedTag}
+                    ${a.status === 'rejected' && a.auto_rejected
+                      ? `<span class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-xs font-medium"><i class="far fa-clock mr-0.5"></i>${t('review_auto_rejected')}</span>`
+                      : ''}
                   </div>
                   <div class="text-sm text-slate-500 mt-1">
                     <i class="fas fa-bullseye text-slate-300 mr-1.5 text-xs"></i>${escHtml(a.purpose || '—')}
@@ -2109,7 +2112,7 @@
                   </div>
                   <div class="text-xs text-slate-400 mt-1.5">${escHtml(requestedServers.join(', '))}</div>
                   ${approvedInfo}
-                  ${a.reviewed_at ? `<div class="text-xs text-slate-400 mt-0.5">${escHtml(a.reviewed_at)} · ${escHtml(a.reviewed_by || '')}</div>` : ''}
+                  ${a.reviewed_at ? `<div class="text-xs text-slate-400 mt-0.5">${escHtml(a.reviewed_at)}${a.auto_rejected ? '' : ' · ' + escHtml(a.reviewed_by || '')}</div>` : ''}
                 </div>
               </div>
             </div>`;

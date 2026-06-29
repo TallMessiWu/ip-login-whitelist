@@ -50,6 +50,8 @@ _LOGIN_RATE_LIMIT: dict = {}          # key=ip, value=[attempt_timestamps]
 _LOGIN_MAX_ATTEMPTS = 10              # 每分钟最多尝试次数
 _LOGIN_RATE_WINDOW = 60               # 窗口秒数
 
+PENDING_AUTO_REJECT_DAYS = 7         # 待审核申请超过该天数未处理 → 自动拒绝
+
 
 def _check_login_rate(ip: str) -> bool:
     """检查 IP 是否超过登录频率限制。返回 True 表示允许继续。"""
@@ -503,10 +505,42 @@ def api_apply():
     return jsonify({"success": True, "message": "申请已提交，请等待管理员审核", "id": app_id})
 
 
+def _auto_reject_stale_applications(cfg: dict) -> int:
+    """把超过 PENDING_AUTO_REJECT_DAYS 天仍未处理的 pending 申请自动拒绝（原地修改 cfg）。
+
+    自动拒绝的申请打 auto_rejected=True 标记、reviewed_by="system"，与管理员手动拒绝区分。
+    返回本次被自动拒绝的数量。created_at 无法解析的申请跳过，避免误伤。
+    """
+    now = datetime.datetime.now()
+    cutoff = now - datetime.timedelta(days=PENDING_AUTO_REJECT_DAYS)
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    count = 0
+    for app_item in cfg.get("applications", []):
+        if app_item.get("status") != "pending":
+            continue
+        created_at = app_item.get("created_at")
+        if not created_at:
+            continue
+        try:
+            created = datetime.datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+        if created < cutoff:
+            app_item["status"] = "rejected"
+            app_item["reviewed_at"] = now_str
+            app_item["reviewed_by"] = "system"
+            app_item["auto_rejected"] = True
+            count += 1
+    return count
+
+
 @app.route("/api/applications", methods=["GET"])
 def api_applications_list():
     """获取所有申请列表（管理员）。"""
     cfg = load_config(purge=False)
+    # 读时惰性处理：超期未审批的 pending 申请自动拒绝（有变更才回写）
+    if _auto_reject_stale_applications(cfg):
+        save_config(cfg)
     apps = cfg.get("applications", [])
     return jsonify({"success": True, "applications": apps})
 
@@ -797,6 +831,11 @@ def _scheduler_run_once():
                 _sched["last_expired"] = []
                 _sched["last_results"] = []
                 return
+
+            # ⓪ 超期未审批的 pending 申请自动拒绝（独立于过期白名单流程，每次都执行）
+            cfg_apps = load_config(purge=False)
+            if _auto_reject_stale_applications(cfg_apps):
+                save_config(cfg_apps)
 
             # ① 读原始 config（不触发 load_config 的自动清除写盘），找出过期条目
             with CONFIG_LOCK, open(CONFIG_FILE, encoding="utf-8") as f:

@@ -1402,6 +1402,34 @@ class TestWebApplications:
         assert resp.status_code == 200
         assert "applications" in resp.get_json()
 
+    def _seed_pending(self, tmp_config_file, app_id, created_at):
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg.setdefault("applications", []).append({
+            "id": app_id, "ip": "2.2.2.2", "name": "张三", "employee_id": "E001",
+            "purpose": "x", "duration": "7d", "expire_at": None, "servers": ["10.0.0.1"],
+            "status": "pending", "approved_servers": [], "deployed": False,
+            "created_at": created_at, "reviewed_at": None, "reviewed_by": None,
+        })
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+    def test_list_auto_rejects_stale_pending(self, logged_in_client, tmp_config_file):
+        old = (datetime.datetime.now() - datetime.timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S")
+        self._seed_pending(tmp_config_file, "STALE1", old)
+        apps = logged_in_client.get("/api/applications").get_json()["applications"]
+        app = next(a for a in apps if a["id"] == "STALE1")
+        assert app["status"] == "rejected"
+        assert app["auto_rejected"] is True
+        assert app["reviewed_by"] == "system"
+        assert app["reviewed_at"]
+
+    def test_list_keeps_recent_pending(self, logged_in_client, tmp_config_file):
+        recent = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        self._seed_pending(tmp_config_file, "FRESH1", recent)
+        apps = logged_in_client.get("/api/applications").get_json()["applications"]
+        app = next(a for a in apps if a["id"] == "FRESH1")
+        assert app["status"] == "pending"
+        assert not app.get("auto_rejected")
+
     def test_approve_application(self, logged_in_client, sample_config):
         # 先提交申请
         logged_in_client.post("/api/apply", json={
@@ -1430,6 +1458,12 @@ class TestWebApplications:
         })
         assert resp.status_code == 200
         assert resp.get_json()["success"] is True
+        # 手动拒绝不带 auto_rejected 标记（与超时自动拒绝区分）
+        apps = logged_in_client.get("/api/applications").get_json()["applications"]
+        rejected = next(a for a in apps if a["id"] == app_id)
+        assert rejected["status"] == "rejected"
+        assert not rejected.get("auto_rejected")
+        assert rejected["reviewed_by"] != "system"
 
     def test_review_nonexistent_application(self, logged_in_client):
         resp = logged_in_client.post("/api/applications/nonexistent/review", json={
@@ -2385,6 +2419,36 @@ class TestSchedulerSkipsDisabled:
         monkeypatch.setattr(web_app, "capture_run", cap)
         web_app._scheduler_run_once()
         assert not cap.called
+
+
+class TestSchedulerAutoReject:
+    def test_scheduler_auto_rejects_stale_pending(self, tmp_config_file, monkeypatch):
+        """后台调度器：超期未审批的 pending 申请被自动拒绝（即便无过期白名单）。"""
+        old = (datetime.datetime.now() - datetime.timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S")
+        recent = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        cfg = {
+            "whitelist": [],
+            "servers": [],
+            "settings": {"ssh_port": 22, "persist_rules": True},
+            "applications": [
+                {"id": "OLD", "ip": "2.2.2.2", "name": "a", "employee_id": "E1", "purpose": "x",
+                 "duration": "7d", "expire_at": None, "servers": [], "status": "pending",
+                 "approved_servers": [], "deployed": False, "created_at": old,
+                 "reviewed_at": None, "reviewed_by": None},
+                {"id": "NEW", "ip": "3.3.3.3", "name": "b", "employee_id": "E2", "purpose": "x",
+                 "duration": "7d", "expire_at": None, "servers": [], "status": "pending",
+                 "approved_servers": [], "deployed": False, "created_at": recent,
+                 "reviewed_at": None, "reviewed_by": None},
+            ],
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        web_app._scheduler_run_once()
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        by_id = {a["id"]: a for a in saved["applications"]}
+        assert by_id["OLD"]["status"] == "rejected"
+        assert by_id["OLD"]["auto_rejected"] is True
+        assert by_id["OLD"]["reviewed_by"] == "system"
+        assert by_id["NEW"]["status"] == "pending"
 
 
 class TestFirewalldAutoStart:
