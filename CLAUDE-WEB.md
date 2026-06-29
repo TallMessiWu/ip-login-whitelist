@@ -120,6 +120,8 @@
 | `templates/guest.html` | Guest 自助换 IP 界面（旧 IP → 新 IP，自动替换并下发） |
 | `templates/apply.html` | 自助申请表单（IP、姓名、工号、目的、时长、目标服务器） |
 
+**执行输出展示**：下发/取消/状态/审计/审核下发拿到后端 `results: [{server, host, success, output}]` 后统一走 `renderRunResults(results, {target, mode})`（`templates/index.html`）渲染——顶部「失败汇总条」(`#${target}-summary`) 红色列出失败服务器为可点击 chip（`scrollToRunLog(target, host)` 跳转到对应日志段并触发 `.log-flash` 高亮），绿色显示成功台数；下方 `#${target}-log` 每台一个带 `${target}-block-${host}` 锚点的分段日志块，失败块加红色左边框。`target` 区分主输出区（`output-*`）与审核输出区（`review-output-*`）；`mode='audit'` 无成功/失败语义，仅按服务器列日志。无 `results` 的纯文本提示（连接中/错误/无日志）仍走 `showOutput()`。摘要文案复用翻译 key `deploy_summary_failed` / `deploy_summary_success` / `deploy_server_success` / `deploy_server_fail`。
+
 ## 十、国际化（i18n）
 
 | 功能 | 位置 | 行号 |

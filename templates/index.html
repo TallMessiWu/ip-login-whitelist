@@ -8,6 +8,8 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <style>
     .log-output { font-family: 'Courier New', 'Consolas', monospace; }
+    .log-flash { animation: logFlash 1.5s ease; }
+    @keyframes logFlash { 0%, 40% { background: rgba(239, 68, 68, .22); } 100% { background: transparent; } }
     .fade-in { animation: fadeIn .2s ease; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
     .spin { animation: spin 1s linear infinite; }
@@ -247,8 +249,9 @@
               <i class="fas fa-xmark"></i> <span data-i18n="deploy_clear_output">清除</span>
             </button>
           </div>
+          <div id="output-summary" class="hidden mb-2 space-y-1 text-xs"></div>
           <div class="log-output bg-slate-900 text-slate-100 rounded-lg px-4 py-3 text-xs leading-relaxed overflow-auto max-h-72">
-            <pre id="output-log" class="whitespace-pre-wrap"></pre>
+            <div id="output-log" class="space-y-3"></div>
           </div>
         </div>
       </div>
@@ -290,8 +293,9 @@
 
       <!-- 下发输出区 -->
       <div id="review-output-wrap" class="hidden">
+        <div id="review-output-summary" class="hidden mb-2 space-y-1 text-xs"></div>
         <div class="log-output bg-slate-900 text-slate-100 rounded-lg px-4 py-3 text-xs leading-relaxed overflow-auto max-h-60">
-          <pre id="review-output-log" class="whitespace-pre-wrap"></pre>
+          <div id="review-output-log" class="space-y-3"></div>
         </div>
       </div>
 
@@ -1415,15 +1419,7 @@
         const data = await res.json();
 
         if (data.results) {
-          let log = '';
-          data.results.forEach(r => {
-            log += '═'.repeat(56) + '\n';
-            log += `  ${r.server} (${r.host})  ${r.success ? t('deploy_server_success') : t('deploy_server_fail')}\n`;
-            log += '─'.repeat(56) + '\n';
-            log += r.output.trimEnd() + '\n\n';
-          });
-          log += t('deploy_complete', {success: data.success_count, total: data.total});
-          showOutput(log);
+          renderRunResults(data.results, {target: 'output', mode: 'deploy'});
 
           const type = data.success_count === data.total ? 'success'
             : data.success_count > 0 ? 'warn' : 'error';
@@ -1468,15 +1464,7 @@
         const data = await res.json();
 
         if (data.results) {
-          let log = '';
-          data.results.forEach(r => {
-            log += '═'.repeat(56) + '\n';
-            log += `  ${r.server} (${r.host})  ${r.success ? t('deploy_server_success') : t('deploy_server_fail')}\n`;
-            log += '─'.repeat(56) + '\n';
-            log += r.output.trimEnd() + '\n\n';
-          });
-          log += t('deploy_complete', {success: data.success_count, total: data.total});
-          showOutput(log);
+          renderRunResults(data.results, {target: 'output', mode: 'remove'});
 
           const type = data.success_count === data.total ? 'success'
             : data.success_count > 0 ? 'warn' : 'error';
@@ -1513,13 +1501,8 @@
         const data = await res.json();
 
         if (data.results) {
-          let log = '';
+          renderRunResults(data.results, {target: 'output', mode: 'status'});
           data.results.forEach(r => {
-            log += '═'.repeat(56) + '\n';
-            log += `  ${r.server} (${r.host})  ${r.success ? '✓' : '✗'}\n`;
-            log += '─'.repeat(56) + '\n';
-            log += r.output.trimEnd() + '\n\n';
-
             const dot = document.getElementById('dot-' + r.host);
             if (dot) {
               dot.className = r.success
@@ -1527,7 +1510,6 @@
                 : 'fas fa-circle text-red-400 text-xs';
             }
           });
-          showOutput(log.trimEnd());
         }
       } catch (e) {
         toast(t('status_check_failed'), 'error');
@@ -1553,14 +1535,7 @@
         const data = await res.json();
 
         if (data.results) {
-          let log = '';
-          data.results.forEach(r => {
-            log += '═'.repeat(56) + '\n';
-            log += `  ${r.server} (${r.host})\n`;
-            log += '─'.repeat(56) + '\n';
-            log += r.output.trimEnd() + '\n\n';
-          });
-          showOutput(log.trimEnd() || t('deploy_no_logs'));
+          renderRunResults(data.results, {target: 'output', mode: 'audit'});
         } else {
           showOutput(data.message || t('load_failed', {msg: ''}));
         }
@@ -1575,14 +1550,93 @@
     // ─── 输出区 ────────────────────────────────────────────────────
 
     function showOutput(text) {
+      document.getElementById('output-summary').classList.add('hidden');
+      const log = document.getElementById('output-log');
+      log.innerHTML = '<pre class="whitespace-pre-wrap"></pre>';
+      log.firstChild.textContent = text;
       document.getElementById('output-wrap').classList.remove('hidden');
-      document.getElementById('output-log').textContent = text;
-      document.getElementById('output-log').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      log.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
     function clearOutput() {
       document.getElementById('output-wrap').classList.add('hidden');
-      document.getElementById('output-log').textContent = '';
+      document.getElementById('output-log').innerHTML = '';
+      const sum = document.getElementById('output-summary');
+      sum.classList.add('hidden');
+      sum.innerHTML = '';
+    }
+
+    // 把并发执行结果渲染成「失败汇总条 + 分段日志」，让失败服务器一目了然。
+    // results: [{server, host, success, output}]；opts.target: 'output' | 'review-output'；
+    // opts.mode: 'deploy' | 'remove' | 'status' | 'audit'（audit 无成功/失败语义，仅列日志）
+    function renderRunResults(results, opts = {}) {
+      const target = opts.target || 'output';
+      const withStatus = (opts.mode || 'deploy') !== 'audit';
+      const wrap = document.getElementById(target + '-wrap');
+      const summaryBox = document.getElementById(target + '-summary');
+      const logBox = document.getElementById(target + '-log');
+      if (!wrap || !logBox) return;
+
+      const failed = results.filter(r => !r.success);
+      const okCount = results.length - failed.length;
+
+      // 失败汇总条：红色列出失败服务器（可点击跳转），绿色显示成功台数
+      let sHtml = '';
+      if (withStatus && failed.length) {
+        const chips = failed.map(r =>
+          `<button type="button" class="inline-flex items-center px-2 py-0.5 rounded bg-red-500/15 text-red-300 hover:bg-red-500/30 transition-colors"`
+          + ` data-host="${escAttr(r.host)}" title="${escAttr(t('deploy_jump_hint'))}"`
+          + ` onclick="scrollToRunLog('${target}', this.dataset.host)">${escHtml(r.server)}</button>`
+        ).join(' ');
+        sHtml += `<div class="flex flex-wrap items-center gap-1.5 text-red-600 font-medium">`
+          + `<span><i class="fas fa-circle-xmark"></i> ${t('deploy_summary_failed', {count: failed.length})}</span>`
+          + chips + `</div>`;
+      }
+      if (withStatus && okCount) {
+        sHtml += `<div class="text-green-600"><i class="fas fa-circle-check"></i> ${t('deploy_summary_success', {count: okCount})}</div>`;
+      }
+      summaryBox.innerHTML = sHtml;
+      summaryBox.classList.toggle('hidden', !sHtml);
+
+      // 分段日志：每台一个独立 DOM 块（带 host 锚点），失败块红色左边框
+      logBox.innerHTML = '';
+      if (!results.length) {
+        const empty = document.createElement('pre');
+        empty.className = 'whitespace-pre-wrap text-slate-400';
+        empty.textContent = t('deploy_no_logs');
+        logBox.appendChild(empty);
+      }
+      results.forEach(r => {
+        const block = document.createElement('div');
+        block.id = target + '-block-' + r.host;
+        block.className = 'log-block' + (withStatus && !r.success ? ' border-l-2 border-red-500 pl-2' : '');
+
+        const head = document.createElement('div');
+        head.className = 'font-semibold mb-1 ' + (!withStatus ? 'text-slate-300' : r.success ? 'text-green-400' : 'text-red-400');
+        const badge = withStatus ? '  ' + (r.success ? t('deploy_server_success') : t('deploy_server_fail')) : '';
+        head.textContent = `${r.server} (${r.host})${badge}`;
+        block.appendChild(head);
+
+        const pre = document.createElement('pre');
+        pre.className = 'whitespace-pre-wrap';
+        pre.textContent = (r.output || '').trimEnd();
+        block.appendChild(pre);
+
+        logBox.appendChild(block);
+      });
+
+      wrap.classList.remove('hidden');
+      (failed.length ? summaryBox : logBox).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    function scrollToRunLog(target, host) {
+      const el = document.getElementById(target + '-block-' + host);
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      el.classList.remove('log-flash');
+      void el.offsetWidth;   // 重启动画
+      el.classList.add('log-flash');
+      setTimeout(() => el.classList.remove('log-flash'), 1600);
     }
 
     // ─── 设置模态框 ────────────────────────────────────────────────
@@ -2231,8 +2285,12 @@
         });
         const data = await res.json();
 
-        if (data.deploy_result) {
-          document.getElementById('review-output-log').textContent = data.deploy_result;
+        if (data.results) {
+          renderRunResults(data.results, {target: 'review-output', mode: 'deploy'});
+        } else if (data.deploy_result) {
+          const rl = document.getElementById('review-output-log');
+          rl.innerHTML = '<pre class="whitespace-pre-wrap"></pre>';
+          rl.firstChild.textContent = data.deploy_result;
           document.getElementById('review-output-wrap').classList.remove('hidden');
         }
         if (data.success) {
