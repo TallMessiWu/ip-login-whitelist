@@ -1349,6 +1349,36 @@ class TestWebApplications:
         assert data["success"] is True
         assert "id" in data
 
+    def test_submit_accepts_two_week_max(self, web_client, sample_config):
+        resp = web_client.post("/api/apply", json={
+            "ip": "2.2.2.2", "name": "张三", "employee_id": "E001",
+            "purpose": "远程办公", "duration": "14d", "servers": ["10.0.0.1"],
+        })
+        assert resp.status_code == 200
+        assert resp.get_json()["success"] is True
+
+    def test_submit_rejects_over_two_weeks_relative(self, web_client, sample_config):
+        resp = web_client.post("/api/apply", json={
+            "ip": "2.2.2.2", "name": "张三", "employee_id": "E001",
+            "purpose": "远程办公", "duration": "30d", "servers": ["10.0.0.1"],
+        })
+        assert resp.status_code == 400
+
+    def test_submit_rejects_over_two_weeks_absolute(self, web_client, sample_config):
+        far = (datetime.datetime.now() + datetime.timedelta(days=60)).strftime("%Y-%m-%d")
+        resp = web_client.post("/api/apply", json={
+            "ip": "2.2.2.2", "name": "张三", "employee_id": "E001",
+            "purpose": "远程办公", "duration": far, "servers": ["10.0.0.1"],
+        })
+        assert resp.status_code == 400
+
+    def test_submit_rejects_permanent(self, web_client, sample_config):
+        resp = web_client.post("/api/apply", json={
+            "ip": "2.2.2.2", "name": "张三", "employee_id": "E001",
+            "purpose": "远程办公", "duration": "never", "servers": ["10.0.0.1"],
+        })
+        assert resp.status_code == 400
+
     def test_submit_missing_fields(self, web_client):
         resp = web_client.post("/api/apply", json={"ip": "1.1.1.1"})
         assert resp.status_code == 400

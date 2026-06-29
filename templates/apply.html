@@ -95,22 +95,17 @@
         <div>
           <label class="block text-xs font-medium text-slate-600 mb-1.5"><span data-i18n="apply_duration_label">使用时长</span> <span class="text-red-400">*</span></label>
           <div class="flex gap-2">
-            <select id="duration-preset" onchange="onDurationPresetChange()"
+            <select id="duration-preset"
               class="flex-1 border border-slate-300 rounded-lg px-2 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
               <option value="" data-i18n="apply_duration_placeholder">请选择时长</option>
               <option value="1d" data-i18n="apply_duration_1d">1 天</option>
               <option value="3d" data-i18n="apply_duration_3d">3 天</option>
               <option value="7d" data-i18n="apply_duration_7d">1 周</option>
               <option value="14d" data-i18n="apply_duration_14d">2 周</option>
-              <option value="30d" data-i18n="apply_duration_30d">30 天</option>
-              <option value="90d" data-i18n="apply_duration_90d">90 天</option>
-              <option value="custom" data-i18n="apply_duration_custom">自定义...</option>
             </select>
-            <input id="duration-custom" type="datetime-local"
-              class="hidden flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
           </div>
           <p class="mt-1 text-xs text-slate-400">
-            <i class="fas fa-circle-info mr-0.5"></i><span data-i18n="apply_duration_hint">选择预设时长时，有效期从审核通过时刻起算；自定义日期则为固定到期时间。不可申请永久。</span>
+            <i class="fas fa-circle-info mr-0.5"></i><span data-i18n="apply_duration_hint">有效期从审核通过时刻起算，最长 2 周。如需更长时间，请联系审核员审核通过后手动延长。</span>
           </p>
         </div>
 
@@ -192,22 +187,8 @@
     // ── 申请逻辑 ──────────────────────────────────────────────────
     let servers = [];
 
-    function onDurationPresetChange() {
-      const preset = document.getElementById('duration-preset');
-      const custom = document.getElementById('duration-custom');
-      if (preset.value === 'custom') {
-        custom.classList.remove('hidden');
-        custom.focus();
-      } else {
-        custom.classList.add('hidden');
-      }
-    }
-
     function getDurationValue() {
-      const preset = document.getElementById('duration-preset');
-      const custom = document.getElementById('duration-custom');
-      if (preset.value === 'custom') return custom.value || '';
-      return preset.value;
+      return document.getElementById('duration-preset').value;
     }
 
     async function loadServers() {
@@ -297,8 +278,6 @@
           document.getElementById('employee-id').value = '';
           document.getElementById('purpose').value = '';
           document.getElementById('duration-preset').value = '';
-          document.getElementById('duration-custom').classList.add('hidden');
-          document.getElementById('duration-custom').value = '';
           document.querySelectorAll('.srv-cb:checked').forEach(cb => cb.checked = false);
         } else {
           showErr(data.message || t('apply_submit_failed'));

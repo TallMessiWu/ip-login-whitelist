@@ -468,12 +468,18 @@ def api_apply():
 
     # 解析时长：相对时长（1d/7d 等）不预计算，等审批时从审批时间起算
     # 绝对时间（datetime-local / 自定义日期）直接存入，审批时不重新计算
-    expire_at = None
-    if not re.match(r'^(\d+)([dhm])$', duration.lower()):
-        try:
-            expire_at = parse_expire(duration)
-        except ValueError:
-            return jsonify({"success": False, "message": f"无效的时长格式: {duration}"}), 400
+    is_relative = bool(re.match(r'^(\d+)([dhm])$', duration.lower()))
+    try:
+        effective_expire = parse_expire(duration)
+    except ValueError:
+        return jsonify({"success": False, "message": f"无效的时长格式: {duration}"}), 400
+    if effective_expire is None:
+        return jsonify({"success": False, "message": "申请时长不能为永久"}), 400
+    # 用户自助申请最长 2 周（绕过前端直接提交时的硬上限）；加 1 分钟容忍相对时长解析与此处取时的微小时间差
+    max_expire = now + datetime.timedelta(days=14, minutes=1)
+    if datetime.datetime.strptime(effective_expire, "%Y-%m-%d %H:%M:%S") > max_expire:
+        return jsonify({"success": False, "message": "申请时长最长为 2 周，如需更长请联系审核员审核通过后手动延长"}), 400
+    expire_at = None if is_relative else effective_expire
 
     app_id = now.strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(4)
     application = {
