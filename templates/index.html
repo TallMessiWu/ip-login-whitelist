@@ -361,6 +361,33 @@
     </div>
   </div>
 
+  <!-- ── 强制覆盖模态框（远端连不上时强制删除/禁用） ──────────────── -->
+  <div id="force-override-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4">
+    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeForceModal()"></div>
+    <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 fade-in">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-base font-semibold text-slate-800">
+          <i class="fas fa-triangle-exclamation text-amber-500 mr-1.5"></i><span data-i18n="force_override_title">强制覆盖</span>
+        </h3>
+        <button onclick="closeForceModal()" class="text-slate-400 hover:text-slate-600 w-7 h-7 flex items-center justify-center rounded-md hover:bg-slate-100">
+          <i class="fas fa-xmark"></i>
+        </button>
+      </div>
+      <div class="text-xs font-medium text-slate-500 mb-1.5" data-i18n="force_override_reason_label">远端失败原因</div>
+      <div class="log-output bg-slate-900 text-slate-100 rounded-lg px-4 py-3 text-xs leading-relaxed overflow-auto max-h-48 mb-3">
+        <pre id="force-override-output" class="whitespace-pre-wrap"></pre>
+      </div>
+      <div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2" data-i18n="force_override_warning">
+        强制操作只会修改网站上的状态，不会清除远端规则。如果服务器只是临时连不上，远端的白名单规则仍会拦截非白名单 IP，请自行登录服务器清理；若管理员已手动关闭白名单则可忽略。
+      </div>
+      <div class="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-100">
+        <button onclick="closeForceModal()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100" data-i18n="cancel">取消</button>
+        <button id="force-override-confirm-btn" onclick="confirmForceOverride()"
+          class="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"></button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── 更新密码模态框 ──────────────────────────────────────── -->
   <div id="edit-pwd-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4">
     <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeEditPwdModal()"></div>
@@ -979,8 +1006,13 @@
           toast(data.message || t('srv_removed', {host: host}), 'success');
           await refreshAll();
         } else {
-          toast(data.message, 'error');
           if (btn) { btn.innerHTML = oldHtml; btn.disabled = false; }
+          // 远端取消失败但可强制：弹出强制覆盖窗口而非简单报错
+          if (res.status === 502 && data.can_force) {
+            openForceModal('delete', host, name, data.output || data.message || '');
+          } else {
+            toast(data.message, 'error');
+          }
         }
       } catch (e) {
         toast(t('operation_failed'), 'error');
@@ -1008,12 +1040,70 @@
           toast(data.message || t(enable ? 'srv_enabled_msg' : 'srv_disabled_msg', {name: name}), 'success');
           await refreshAll();   // 重渲染会替换该按钮，无需手动复原
         } else {
-          toast(data.message || t('srv_disable_failed'), 'error');
           if (btn) { btn.innerHTML = oldHtml; btn.disabled = false; }
+          // 远端取消失败但可强制：弹出强制覆盖窗口
+          if (res.status === 502 && data.can_force) {
+            openForceModal('disable', host, name, data.output || data.message || '');
+          } else {
+            toast(data.message || t('srv_disable_failed'), 'error');
+          }
         }
       } catch (e) {
         toast(t('operation_failed'), 'error');
         if (btn) { btn.innerHTML = oldHtml; btn.disabled = false; }
+      }
+    }
+
+    // ── 强制覆盖：远端连不上时跳过远端，直接改网站状态 ──────────────
+    let _forceCtx = null;
+
+    function openForceModal(action, host, name, output) {
+      _forceCtx = { action, host, name };
+      document.getElementById('force-override-output').textContent =
+        output || t('force_override_no_detail');
+      const confirmBtn = document.getElementById('force-override-confirm-btn');
+      confirmBtn.textContent = t(action === 'delete' ? 'force_override_delete_btn' : 'force_override_disable_btn');
+      document.getElementById('force-override-modal').classList.remove('hidden');
+      setTimeout(i18nPage, 0);
+    }
+
+    function closeForceModal() {
+      document.getElementById('force-override-modal').classList.add('hidden');
+      _forceCtx = null;
+    }
+
+    async function confirmForceOverride() {
+      if (!_forceCtx) return;
+      const { action, host, name } = _forceCtx;
+      const confirmBtn = document.getElementById('force-override-confirm-btn');
+      const oldHtml = confirmBtn.innerHTML;
+      confirmBtn.innerHTML = '<i class="fas fa-circle-notch spin"></i>';
+      confirmBtn.disabled = true;
+      try {
+        let res;
+        if (action === 'delete') {
+          res = await fetch(`/api/servers/${encodeURIComponent(host)}?force=1`, { method: 'DELETE' });
+        } else {
+          res = await fetch(`/api/servers/${encodeURIComponent(host)}/toggle`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: false, force: true }),
+          });
+        }
+        const data = await res.json();
+        if (data.success) {
+          toast(data.message || t(action === 'delete' ? 'srv_force_removed' : 'srv_force_disabled', {name: name}), 'success');
+          closeForceModal();
+          await refreshAll();
+        } else {
+          toast(data.message || t('operation_failed'), 'error');
+          confirmBtn.innerHTML = oldHtml;
+          confirmBtn.disabled = false;
+        }
+      } catch (e) {
+        toast(t('operation_failed'), 'error');
+        confirmBtn.innerHTML = oldHtml;
+        confirmBtn.disabled = false;
       }
     }
 

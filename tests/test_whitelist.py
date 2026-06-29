@@ -2072,14 +2072,31 @@ class TestServerToggle:
         assert srv["enabled"] is False
 
     def test_disable_failure_rolls_back(self, logged_in_client, sample_config, monkeypatch):
-        """禁用：远端取消失败则回滚，保持 enabled=True，返回 502。"""
+        """禁用：远端取消失败则回滚，保持 enabled=True，返回 502 且带 can_force。"""
         monkeypatch.setattr(web_app, "capture_run", mock.MagicMock(return_value=(False, "ssh fail")))
         resp = logged_in_client.post("/api/servers/10.0.0.1/toggle", json={"enabled": False})
         assert resp.status_code == 502
-        assert resp.get_json()["success"] is False
+        data = resp.get_json()
+        assert data["success"] is False
+        assert data["can_force"] is True  # 前端据此弹强制覆盖窗
         cfg = wm.load_config(purge=False)
         srv = next(s for s in cfg["servers"] if s["host"] == "10.0.0.1")
         assert srv.get("enabled", True) is True  # 未被改为禁用
+
+    def test_disable_force_skips_remote(self, logged_in_client, sample_config, monkeypatch):
+        """force：即使远端不可达也跳过远端，强制标记为禁用。"""
+        cap = mock.MagicMock(return_value=(False, "ssh fail"))
+        monkeypatch.setattr(web_app, "capture_run", cap)
+        resp = logged_in_client.post("/api/servers/10.0.0.1/toggle",
+                                     json={"enabled": False, "force": True})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["enabled"] is False
+        assert data["forced"] is True
+        assert not cap.called  # 强制时不连远端
+        cfg = wm.load_config(purge=False)
+        srv = next(s for s in cfg["servers"] if s["host"] == "10.0.0.1")
+        assert srv["enabled"] is False
 
     def test_enable_does_not_call_remote(self, logged_in_client, sample_config, monkeypatch):
         """启用：仅恢复状态，不触发任何远端调用。"""
@@ -2116,12 +2133,24 @@ class TestServerRemoveCancelsWhitelist:
         assert all(s["host"] != "10.0.0.1" for s in cfg["servers"])
 
     def test_remove_blocked_when_cancel_fails(self, logged_in_client, sample_config, monkeypatch):
-        """删除启用中的服务器：远端取消失败则不删除，返回 502。"""
+        """删除启用中的服务器：远端取消失败则不删除，返回 502 且带 can_force。"""
         monkeypatch.setattr(web_app, "capture_run", mock.MagicMock(return_value=(False, "ssh fail")))
         resp = logged_in_client.delete("/api/servers/10.0.0.1")
         assert resp.status_code == 502
+        assert resp.get_json()["can_force"] is True  # 前端据此弹强制覆盖窗
         cfg = wm.load_config(purge=False)
         assert any(s["host"] == "10.0.0.1" for s in cfg["servers"])  # 仍在
+
+    def test_remove_force_skips_remote(self, logged_in_client, sample_config, monkeypatch):
+        """force=1：即使远端不可达也跳过远端，直接强制删除。"""
+        cap = mock.MagicMock(return_value=(False, "ssh fail"))
+        monkeypatch.setattr(web_app, "capture_run", cap)
+        resp = logged_in_client.delete("/api/servers/10.0.0.1?force=1")
+        assert resp.status_code == 200
+        assert resp.get_json()["forced"] is True
+        assert not cap.called  # 强制时不连远端
+        cfg = wm.load_config(purge=False)
+        assert all(s["host"] != "10.0.0.1" for s in cfg["servers"])
 
     def test_remove_disabled_skips_remote(self, logged_in_client, sample_config, monkeypatch):
         """删除已禁用的服务器：白名单此前已取消，直接删除不调用远端。"""

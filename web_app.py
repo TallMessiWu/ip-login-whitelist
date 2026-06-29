@@ -1224,23 +1224,31 @@ def api_server_remove(host):
     if not srv:
         return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
 
+    # force：远端连不上（如管理员自行关闭白名单并改了密码）时，跳过远端取消，
+    # 强制把服务器从网站移除。此时远端可能残留白名单规则，需用户自行清理。
+    force = request.args.get("force") in ("1", "true", "True")
+    name = srv.get("name", srv["host"])
+
     # 删除前先取消该服务器的白名单（恢复默认开放），取消成功才允许删除——
     # 否则远端的 SSH 限制规则会成为无人管理的"孤儿规则"，可能把人锁在门外。
     # 已禁用的服务器其白名单此前已被取消，直接删除，避免离线服务器永远删不掉。
-    if srv.get("enabled", True):
+    if srv.get("enabled", True) and not force:
         ssh_port = cfg["settings"].get("ssh_port", 22)
         script = generate_remove_script(ssh_port)
         ok, output = capture_run(srv, script, config=cfg)
         if not ok:
             return jsonify({
                 "success": False,
+                "can_force": True,
                 "message": "删除失败：远端取消白名单未成功，服务器未被删除，请检查连通性后重试",
                 "output": output,
             }), 502
 
     cfg["servers"] = [s for s in cfg["servers"] if s["host"] != srv["host"]]
     save_config(cfg)
-    return jsonify({"success": True, "message": f"已取消白名单并移除服务器 {srv.get('name', srv['host'])}"})
+    message = (f"已强制移除服务器 {name}（未取消远端白名单，远端可能残留规则）"
+               if force else f"已取消白名单并移除服务器 {name}")
+    return jsonify({"success": True, "forced": force, "message": message})
 
 
 @app.route("/api/servers/<path:host>", methods=["PATCH"])
@@ -1278,6 +1286,8 @@ def api_server_toggle(host):
     if "enabled" not in data:
         return jsonify({"success": False, "message": "缺少 enabled 字段"}), 400
     enabled = bool(data["enabled"])
+    # force：远端连不上时跳过远端取消，强制把服务器标记为禁用（远端可能残留规则）
+    force = bool(data.get("force"))
 
     cfg = load_config()
     srv = _find_server(cfg, host)
@@ -1292,21 +1302,24 @@ def api_server_toggle(host):
         return jsonify({"success": True, "enabled": True,
                         "message": f"已启用 {name}（白名单未自动下发，如需生效请手动下发）"})
 
-    # 禁用：先远端取消白名单，成功才标记禁用（失败回滚，保持启用）
-    ssh_port = cfg["settings"].get("ssh_port", 22)
-    script = generate_remove_script(ssh_port)
-    ok, output = capture_run(srv, script, config=cfg)
-    if not ok:
-        return jsonify({
-            "success": False,
-            "enabled": True,
-            "message": f"禁用失败：远端取消 {name} 的白名单未成功，已保持启用状态",
-            "output": output,
-        }), 502
+    # 禁用：先远端取消白名单，成功才标记禁用（失败回滚，保持启用）；force 则跳过远端
+    if not force:
+        ssh_port = cfg["settings"].get("ssh_port", 22)
+        script = generate_remove_script(ssh_port)
+        ok, output = capture_run(srv, script, config=cfg)
+        if not ok:
+            return jsonify({
+                "success": False,
+                "enabled": True,
+                "can_force": True,
+                "message": f"禁用失败：远端取消 {name} 的白名单未成功，已保持启用状态",
+                "output": output,
+            }), 502
     srv["enabled"] = False
     save_config(cfg)
-    return jsonify({"success": True, "enabled": False,
-                    "message": f"已禁用 {name} 并取消其白名单", "output": output})
+    message = (f"已强制禁用 {name}（未取消远端白名单，远端可能残留规则）"
+               if force else f"已禁用 {name} 并取消其白名单")
+    return jsonify({"success": True, "enabled": False, "forced": force, "message": message})
 
 
 # ─── API：服务器专属白名单 ─────────────────────────────────────────────────────
