@@ -12,6 +12,7 @@ import datetime
 import hashlib
 import subprocess
 import secrets as secrets_module
+import base64
 from pathlib import Path
 from unittest import mock
 from contextlib import redirect_stdout
@@ -33,6 +34,12 @@ with mock.patch.dict(sys.modules, _module_mocks, clear=False):
 # 注入缺失的 import 到 whitelist_manager 模块命名空间（加密功能新增但 import 不完整）
 wm.secrets = secrets_module
 wm.hashlib = hashlib
+
+
+def fake_public_key(key_type="ssh-ed25519", suffix=b"test-key"):
+    raw_type = key_type.encode()
+    blob = len(raw_type).to_bytes(4, "big") + raw_type + suffix
+    return f"{key_type} {base64.b64encode(blob).decode()} user@example"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2566,3 +2573,163 @@ def test_total_count():
                 methods.append(f"{cls.__name__}.{name}")
     # 确保有足够数量的测试
     assert len(methods) >= 100, f"预期至少 100 个测试，实际 {len(methods)} 个"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SSH 公钥白名单
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestPublicKeyModel:
+    def test_normalize_fingerprint_and_identity(self):
+        key = fake_public_key()
+        normalized, blob = wm.normalize_public_key(key)
+        assert normalized == " ".join(key.split()[:2])
+        entry = wm._make_public_key_entry(key, "alice", "laptop")
+        assert entry["public_key"] == normalized
+        assert entry["fingerprint"].startswith("SHA256:")
+        assert entry["id"] == wm._make_public_key_entry(key, "alice", "other")["id"]
+        assert entry["id"] != wm._make_public_key_entry(key, "root", "")["id"]
+        assert blob
+
+    @pytest.mark.parametrize("value", [
+        "", "-----BEGIN OPENSSH PRIVATE KEY-----",
+        'from="1.2.3.4" ssh-ed25519 AAAA',
+        "ssh-ed25519-cert-v01@openssh.com AAAA", "ssh-ed25519 not-base64",
+    ])
+    def test_rejects_unsafe_or_invalid_keys(self, value):
+        with pytest.raises(ValueError):
+            wm.normalize_public_key(value)
+
+    def test_rejects_mismatched_embedded_type(self):
+        with pytest.raises(ValueError, match="类型"):
+            wm.normalize_public_key(fake_public_key().replace("ssh-ed25519 ", "ssh-rsa ", 1))
+
+    def test_merge_and_purge_public_keys(self):
+        past = "2000-01-01 00:00:00"
+        global_key = wm._make_public_key_entry(fake_public_key(suffix=b"g"), "root", "")
+        expired = wm._make_public_key_entry(fake_public_key(suffix=b"x"), "root", "", past)
+        server_key = wm._make_public_key_entry(fake_public_key(suffix=b"s"), "alice", "")
+        cfg = {"whitelist": [], "public_key_whitelist": [global_key, expired],
+               "servers": [{"host": "s1", "whitelist": [], "public_key_whitelist": [server_key]}]}
+        merged = wm.get_merged_public_keys(cfg["servers"][0], cfg["public_key_whitelist"])
+        assert [e["id"] for e in merged] == [global_key["id"], server_key["id"]]
+        removed = wm.purge_expired_entries(cfg)
+        assert any(scope == "全局公钥" and e["id"] == expired["id"] for scope, e in removed)
+
+    def test_recovery_path_accepts_locked_permanent_management_key(self, monkeypatch):
+        key = wm._make_public_key_entry(fake_public_key(), "root", "", locked=True)
+        monkeypatch.setattr(wm, "_public_key_from_private_file", lambda _: key["public_key"])
+        server = {"user": "root", "key_file": "id_ed25519"}
+        assert wm.has_locked_recovery_path(server, None, [], [key]) is True
+        key["expire_at"] = "2099-01-01 00:00:00"
+        assert wm.has_locked_recovery_path(server, None, [], [key]) is False
+
+
+class TestPublicKeyScripts:
+    def test_hybrid_script_uses_managed_file_and_never_user_authorized_keys(self):
+        key = wm._make_public_key_entry(fake_public_key(), "root", "")
+        script = wm.generate_apply_script([{"ip": "203.0.113.10"}], 22, True, public_keys=[key])
+        assert "HYBRID_MODE=true" in script
+        assert 'MATCH_ADDRESS="*,!203.0.113.10"' in script
+        assert "AuthorizedKeysFile /etc/ssh/ip-login-whitelist/authorized_keys/%u" in script
+        assert "AuthenticationMethods publickey" in script
+        assert '\"$SSHD_BIN\" -T -C' in script
+        assert "~/.ssh/authorized_keys" not in script
+        assert ".ssh/authorized_keys" not in script
+        assert "正在回滚" in script
+
+    def test_key_only_and_empty_modes(self):
+        key = wm._make_public_key_entry(fake_public_key(), "root", "")
+        key_only = wm.generate_apply_script([], 22, True, public_keys=[key])
+        assert 'MATCH_ADDRESS="*"' in key_only
+        assert 'iptables -A "$CHAIN" -j ACCEPT' in key_only
+        empty = wm.generate_apply_script([], 22, True, public_keys=[])
+        assert "HYBRID_MODE=false" in empty
+        assert 'iptables -A "$CHAIN" -j DROP' in empty
+        assert "disable_managed_public_keys" in empty
+
+    def test_remove_restores_policy_but_keeps_key_files(self):
+        script = wm.generate_remove_script(22)
+        assert "恢复原 SSH 认证" in script
+        assert 'rm -f "$SSHD_DROPIN"' in script
+        assert "rm -rf /etc/ssh/ip-login-whitelist" not in script
+
+
+class TestPublicKeyAPI:
+    def test_global_crud_and_lock(self, logged_in_client):
+        key = fake_public_key()
+        resp = logged_in_client.post("/api/public-keys", json={
+            "linux_user": "alice", "public_key": key, "description": "laptop", "expire_at": "7d",
+        })
+        assert resp.status_code == 200
+        entry = resp.get_json()["entry"]
+        assert entry["public_key"] == " ".join(key.split()[:2])
+        duplicate = logged_in_client.post("/api/public-keys", json={"linux_user": "alice", "public_key": key})
+        assert duplicate.status_code == 409
+        assert logged_in_client.patch(f"/api/public-keys/{entry['id']}/lock", json={"locked": True}).status_code == 200
+        assert logged_in_client.delete(f"/api/public-keys/{entry['id']}").status_code == 403
+        assert logged_in_client.patch(f"/api/public-keys/{entry['id']}/lock", json={"locked": False}).status_code == 200
+        assert logged_in_client.delete(f"/api/public-keys/{entry['id']}").status_code == 200
+
+    def test_server_specific_and_public_endpoint_does_not_leak(self, logged_in_client):
+        resp = logged_in_client.post("/api/servers/10.0.0.1/public-keys", json={
+            "linux_user": "root", "public_key": fake_public_key(),
+        })
+        assert resp.status_code == 200
+        cfg = logged_in_client.get("/api/config").get_json()
+        assert len(cfg["servers"][0]["public_key_whitelist"]) == 1
+        public = logged_in_client.get("/api/servers-public").get_json()
+        assert "public_key_whitelist" not in public["servers"][0]
+
+    def test_rejects_options_and_invalid_user(self, logged_in_client):
+        resp = logged_in_client.post("/api/public-keys", json={
+            "linux_user": "root;touch /tmp/pwn", "public_key": fake_public_key(),
+        })
+        assert resp.status_code == 400
+        resp = logged_in_client.post("/api/public-keys", json={
+            "linux_user": "root", "public_key": 'command="id" ' + fake_public_key(),
+        })
+        assert resp.status_code == 400
+
+
+class TestPublicKeyCLI:
+    def test_add_list_lock_unlock_remove(self, sample_config, tmp_config_file, capsys):
+        parser = wm.build_parser()
+        add = parser.parse_args([
+            "pubkey", "add", "--user", "root", "--key", fake_public_key(), "--desc", "admin-key",
+        ])
+        add.func(add)
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        entry = saved["public_key_whitelist"][0]
+        listed = parser.parse_args(["pubkey", "list"])
+        listed.func(listed)
+        assert entry["fingerprint"] in capsys.readouterr().out
+        lock = parser.parse_args(["pubkey", "lock", entry["id"]])
+        lock.func(lock)
+        unlock = parser.parse_args(["pubkey", "unlock", entry["id"]])
+        unlock.func(unlock)
+        remove = parser.parse_args(["pubkey", "remove", entry["id"]])
+        remove.func(remove)
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        assert saved["public_key_whitelist"] == []
+
+
+class TestPublicKeyScheduler:
+    def test_last_public_key_expiry_deploys_deny_all(self, tmp_config_file, monkeypatch):
+        expired = wm._make_public_key_entry(fake_public_key(), "root", "", "2000-01-01 00:00:00")
+        cfg = {
+            "whitelist": [], "public_key_whitelist": [expired],
+            "servers": [{"host": "s1", "name": "s1", "user": "root", "port": 22,
+                         "password": "x", "key_file": "", "enabled": True,
+                         "whitelist": [], "public_key_whitelist": []}],
+            "settings": {"ssh_port": 22, "persist_rules": False,
+                         "auto_deploy": {"enabled": False, "interval_minutes": 5}},
+        }
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        scripts = []
+        monkeypatch.setattr(web_app, "capture_run", lambda server, script, **kwargs: (scripts.append(script) or True, "ok"))
+        web_app._scheduler_run_once()
+        assert scripts and "HYBRID_MODE=false" in scripts[0]
+        assert 'iptables -A "$CHAIN" -j DROP' in scripts[0]
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        assert saved["public_key_whitelist"] == []

@@ -38,6 +38,8 @@ from whitelist_manager import (
     run_on_server, get_merged_whitelist, _find_server, _make_ip_entry,
     ip_covered_by_whitelist, get_outgoing_ip, parse_expire,
     is_entry_expired, CONFIG_FILE, CONFIG_LOCK,
+    get_merged_public_keys, _make_public_key_entry,
+    has_locked_recovery_path,
 )
 from translations import get_translations, detect_language
 
@@ -366,17 +368,16 @@ def api_guest_replace():
     ssh_port = cfg["settings"].get("ssh_port", 22)
     persist = cfg["settings"].get("persist_rules", True)
     global_whitelist = cfg["whitelist"]
+    global_public_keys = cfg.get("public_key_whitelist", [])
 
     def _replace_deploy_one(server):
         merged = get_merged_whitelist(server, global_whitelist)
-        if not merged:
-            return {
-                "server": server.get("name", server["host"]),
-                "host": server["host"],
-                "success": False,
-                "output": "[SKIP] 白名单已全空，跳过自动下发",
-            }
-        script = generate_apply_script(merged, ssh_port, persist)
+        keys = get_merged_public_keys(server, global_public_keys)
+        if keys and not has_locked_recovery_path(
+                server, get_outgoing_ip(server["host"]), global_whitelist, keys):
+            return {"server": server.get("name", server["host"]), "host": server["host"],
+                    "success": False, "output": "[ERROR] 缺少永久锁定的管理恢复通道，拒绝首次启用混合模式"}
+        script = generate_apply_script(merged, ssh_port, persist, public_keys=keys)
         ok, output = capture_run(server, script, config=cfg)
         return {
             "server": server.get("name", server["host"]),
@@ -717,17 +718,16 @@ def api_applications_deploy():
     ssh_port = cfg["settings"].get("ssh_port", 22)
     persist = cfg["settings"].get("persist_rules", True)
     global_whitelist = cfg["whitelist"]
+    global_public_keys = cfg.get("public_key_whitelist", [])
 
     def _app_deploy_one(server):
         merged = get_merged_whitelist(server, global_whitelist)
-        if not merged:
-            return {
-                "server": server.get("name", server["host"]),
-                "host": server["host"],
-                "success": False,
-                "output": "[SKIP] 白名单已全空，跳过自动下发",
-            }
-        script = generate_apply_script(merged, ssh_port, persist)
+        keys = get_merged_public_keys(server, global_public_keys)
+        if keys and not has_locked_recovery_path(
+                server, get_outgoing_ip(server["host"]), global_whitelist, keys):
+            return {"server": server.get("name", server["host"]), "host": server["host"],
+                    "success": False, "output": "[ERROR] 缺少永久锁定的管理恢复通道，拒绝首次启用混合模式"}
+        script = generate_apply_script(merged, ssh_port, persist, public_keys=keys)
         ok, output = capture_run(server, script, config=cfg)
         return {
             "server": server.get("name", server["host"]),
@@ -811,9 +811,15 @@ def _find_affected_servers(raw_cfg: dict) -> set:
     for e in raw_cfg.get("whitelist", []):
         if is_entry_expired(e):
             return all_hosts          # 全局过期 → 全部受影响，直接返回
+    for e in raw_cfg.get("public_key_whitelist", []):
+        if is_entry_expired(e):
+            return all_hosts
 
     for srv in raw_cfg.get("servers", []):
         for e in srv.get("whitelist", []):
+            if is_entry_expired(e):
+                affected.add(srv["host"])
+        for e in srv.get("public_key_whitelist", []):
             if is_entry_expired(e):
                 affected.add(srv["host"])
 
@@ -846,10 +852,18 @@ def _scheduler_run_once():
             for e in raw_cfg.get("whitelist", []):
                 if is_entry_expired(e):
                     expired_summary.append(f"[全局] {e['ip']}")
+            for e in raw_cfg.get("public_key_whitelist", []):
+                if is_entry_expired(e):
+                    expired_summary.append(f"[全局公钥] {e.get('linux_user', '')} {e.get('fingerprint', '')}")
             for srv in raw_cfg.get("servers", []):
                 for e in srv.get("whitelist", []):
                     if is_entry_expired(e):
                         expired_summary.append(f"[{srv.get('name', srv['host'])}] {e['ip']}")
+                for e in srv.get("public_key_whitelist", []):
+                    if is_entry_expired(e):
+                        expired_summary.append(
+                            f"[{srv.get('name', srv['host'])} 公钥] {e.get('linux_user', '')} {e.get('fingerprint', '')}"
+                        )
 
             _sched["last_expired"] = expired_summary
 
@@ -872,14 +886,8 @@ def _scheduler_run_once():
 
             def _sched_deploy_one(server):
                 merged = get_merged_whitelist(server, cfg["whitelist"])
-                if not merged:
-                    return {
-                        "server": server.get("name", server["host"]),
-                        "host": server["host"],
-                        "success": False,
-                        "output": "[SKIP] 白名单已全空，跳过自动下发（防止锁死服务器）",
-                    }
-                script = generate_apply_script(merged, ssh_port, persist)
+                keys = get_merged_public_keys(server, cfg.get("public_key_whitelist", []))
+                script = generate_apply_script(merged, ssh_port, persist, public_keys=keys)
                 ok, output = capture_run(server, script, config=cfg)
                 return {
                     "server": server.get("name", server["host"]),
@@ -1231,6 +1239,146 @@ def api_whitelist_lock(ip):
     return jsonify({"success": True, "message": ("已锁定" if locked else "已解锁") + f" {ip}", "entry": entry})
 
 
+# ─── API：SSH 公钥白名单管理 ────────────────────────────────────────────────
+
+def _public_key_scope(cfg: dict, host: str | None):
+    if not host:
+        return cfg, cfg.setdefault("public_key_whitelist", [])
+    srv = _find_server(cfg, host)
+    if not srv:
+        return None, None
+    return srv, srv.setdefault("public_key_whitelist", [])
+
+
+def _parse_public_key_request(data: dict, existing: dict = None) -> dict:
+    public_key = data.get("public_key", existing.get("public_key", "") if existing else "")
+    linux_user = data.get("linux_user", existing.get("linux_user", "") if existing else "")
+    description = data.get("description", existing.get("description", "") if existing else "")
+    raw_expire = data.get("expire_at", existing.get("expire_at", "") if existing else "") or ""
+    expire_at = parse_expire(raw_expire.strip()) if raw_expire.strip() else None
+    return _make_public_key_entry(
+        public_key, linux_user, description.strip(), expire_at,
+        added_by=(existing or {}).get("added_by") or session.get("username", "admin"),
+        locked=bool((existing or {}).get("locked")),
+    )
+
+
+def _api_public_key_add(host: str | None = None):
+    data = request.json or {}
+    cfg = load_config()
+    owner, wl = _public_key_scope(cfg, host)
+    if owner is None:
+        return jsonify({"success": False, "message": f"未找到服务器: {host}"}), 404
+    try:
+        entry = _parse_public_key_request(data)
+    except ValueError as e:
+        return jsonify({"success": False, "message": str(e)}), 400
+    if any(e.get("id") == entry["id"] for e in wl):
+        return jsonify({"success": False, "message": "该用户的公钥已存在"}), 409
+    wl.append(entry)
+
+    cleaned = 0
+    inherited_locked = False
+    if not host:
+        for srv in cfg.get("servers", []):
+            current = srv.get("public_key_whitelist", [])
+            inherited_locked = inherited_locked or any(
+                e.get("id") == entry["id"] and e.get("locked") for e in current
+            )
+            before = len(current)
+            srv["public_key_whitelist"] = [e for e in current if e.get("id") != entry["id"]]
+            cleaned += before - len(srv["public_key_whitelist"])
+        if inherited_locked:
+            entry["locked"] = True
+    save_config(cfg)
+    return jsonify({"success": True, "entry": entry, "cleaned": cleaned,
+                    "message": f"已添加 {entry['linux_user']} {entry['fingerprint']}"})
+
+
+@app.route("/api/public-keys", methods=["POST"])
+def api_public_key_add():
+    return _api_public_key_add()
+
+
+@app.route("/api/servers/<path:host>/public-keys", methods=["POST"])
+def api_server_public_key_add(host):
+    return _api_public_key_add(host)
+
+
+def _api_public_key_item(key_id: str, host: str | None = None):
+    cfg = load_config()
+    owner, wl = _public_key_scope(cfg, host)
+    if owner is None:
+        return jsonify({"success": False, "message": f"未找到服务器: {host}"}), 404
+    entry = next((e for e in wl if e.get("id") == key_id), None)
+    if not entry:
+        return jsonify({"success": False, "message": "未找到公钥条目"}), 404
+    if entry.get("locked"):
+        return jsonify({"success": False, "message": "公钥已锁定，请先解锁"}), 403
+
+    if request.method == "DELETE":
+        owner["public_key_whitelist"] = [e for e in wl if e.get("id") != key_id]
+        save_config(cfg)
+        return jsonify({"success": True, "message": f"已移除 {entry['fingerprint']}"})
+
+    try:
+        updated = _parse_public_key_request(request.json or {}, existing=entry)
+    except ValueError as e:
+        return jsonify({"success": False, "message": str(e)}), 400
+    if updated["id"] != key_id and any(e.get("id") == updated["id"] for e in wl):
+        return jsonify({"success": False, "message": "该用户的公钥已存在"}), 409
+    updated["added_at"] = entry.get("added_at", updated["added_at"])
+    entry.clear()
+    entry.update(updated)
+    if not host:
+        for srv in cfg.get("servers", []):
+            current = srv.get("public_key_whitelist", [])
+            if any(e.get("id") == entry["id"] and e.get("locked") for e in current):
+                entry["locked"] = True
+            srv["public_key_whitelist"] = [e for e in current if e.get("id") != entry["id"]]
+    save_config(cfg)
+    return jsonify({"success": True, "message": "已更新公钥", "entry": entry})
+
+
+@app.route("/api/public-keys/<key_id>", methods=["PATCH", "DELETE"])
+def api_public_key_item(key_id):
+    return _api_public_key_item(key_id)
+
+
+@app.route("/api/servers/<path:host>/public-keys/<key_id>", methods=["PATCH", "DELETE"])
+def api_server_public_key_item(host, key_id):
+    return _api_public_key_item(key_id, host)
+
+
+def _api_public_key_lock(key_id: str, host: str | None = None):
+    data = request.json or {}
+    if "locked" not in data:
+        return jsonify({"success": False, "message": "缺少 locked 字段"}), 400
+    cfg = load_config()
+    owner, wl = _public_key_scope(cfg, host)
+    if owner is None:
+        return jsonify({"success": False, "message": f"未找到服务器: {host}"}), 404
+    entry = next((e for e in wl if e.get("id") == key_id), None)
+    if not entry:
+        return jsonify({"success": False, "message": "未找到公钥条目"}), 404
+    if data["locked"]:
+        entry["locked"] = True
+    else:
+        entry.pop("locked", None)
+    save_config(cfg)
+    return jsonify({"success": True, "message": "已锁定" if data["locked"] else "已解锁", "entry": entry})
+
+
+@app.route("/api/public-keys/<key_id>/lock", methods=["PATCH"])
+def api_public_key_lock(key_id):
+    return _api_public_key_lock(key_id)
+
+
+@app.route("/api/servers/<path:host>/public-keys/<key_id>/lock", methods=["PATCH"])
+def api_server_public_key_lock(host, key_id):
+    return _api_public_key_lock(key_id, host)
+
+
 # ─── API：服务器管理 ──────────────────────────────────────────────────────────
 
 @app.route("/api/servers", methods=["POST"])
@@ -1253,6 +1401,7 @@ def api_server_add():
         "password": data.get("password") or "",
         "proxy": data.get("proxy") or "",
         "whitelist": [],
+        "public_key_whitelist": [],
         "enabled": True,
     }
     cfg["servers"].append(server)
@@ -1600,10 +1749,12 @@ def api_deploy():
 
     # 预先计算每台服务器的合并白名单（全局 + 专属）
     global_whitelist = cfg["whitelist"]
+    global_public_keys = cfg.get("public_key_whitelist", [])
     server_merged_map = {s["host"]: get_merged_whitelist(s, global_whitelist) for s in servers}
+    server_key_map = {s["host"]: get_merged_public_keys(s, global_public_keys) for s in servers}
 
-    if all(not m for m in server_merged_map.values()):
-        return jsonify({"success": False, "message": "白名单为空，部署会阻断所有 SSH 连接，请先添加 IP"}), 400
+    if all(not server_merged_map[s["host"]] and not server_key_map[s["host"]] for s in servers):
+        return jsonify({"success": False, "message": "IP 与公钥白名单均为空，请通过过期调度严格撤权或先配置恢复通道"}), 400
 
     # 硬拦截：管理服务器（运行本 Web 应用的主机）的本地出口 IP 必须在全局白名单中。
     # 防止误删/误改导致管理机失去对目标服务器的 SSH 访问能力——此处只接受全局白名单，
@@ -1613,23 +1764,37 @@ def api_deploy():
         first_host = servers[0]["host"]
         local_ip = get_outgoing_ip(first_host)
         loopback_or_unknown = {None, "", "127.0.0.1", "::1"}
-        if local_ip not in loopback_or_unknown and not ip_covered_by_whitelist(local_ip, global_whitelist):
+        unsafe_hybrid = [
+            s for s in servers if server_key_map[s["host"]]
+            and not audit
+            and not has_locked_recovery_path(s, local_ip, global_whitelist, server_key_map[s["host"]])
+        ]
+        if unsafe_hybrid:
             return jsonify({
                 "success": False,
                 "message": (
-                    f"拦截：管理服务器本地 IP {local_ip} 不在全局白名单中。"
-                    f"下发后管理机将无法 SSH 到目标服务器。"
-                    f"请先将该 IP 加入全局白名单（建议同时锁定）。"
+                    "拦截：混合模式缺少永久锁定的恢复通道。"
+                    "请锁定管理机全局 IP，或将 server.key_file 对应公钥以管理用户身份永久锁定。"
                 ),
                 "local_ip": local_ip,
+                "servers": [s["host"] for s in unsafe_hybrid],
             }), 403
+        ip_only_servers = [s for s in servers if not server_key_map[s["host"]]]
+        if (local_ip not in loopback_or_unknown and ip_only_servers
+                and not ip_covered_by_whitelist(local_ip, global_whitelist)):
+            return jsonify({"success": False,
+                            "message": f"拦截：管理服务器本地 IP {local_ip} 不在全局白名单中。",
+                            "local_ip": local_ip}), 403
 
     ssh_port = cfg["settings"].get("ssh_port", 22)
     persist = cfg["settings"].get("persist_rules", True)
 
     def _deploy_one(server):
         merged = server_merged_map[server["host"]]
-        script = generate_apply_script(merged, ssh_port, persist, audit=audit)
+        script = generate_apply_script(
+            merged, ssh_port, persist, audit=audit,
+            public_keys=server_key_map[server["host"]],
+        )
         ok, output = capture_run(server, script, dry_run=dry_run, config=cfg)
         return {
             "server": server.get("name", server["host"]),

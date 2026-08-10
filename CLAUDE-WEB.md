@@ -57,6 +57,19 @@
 
 添加全局 IP 时自动清除各服务器专属白名单重复项，并**继承锁定状态**：任一被清除的专属条目处于 `locked=true` 时，新建的全局条目也自动加锁（防"提升到全局"绕过锁定）。锁定的条目无法被删除/编辑/Guest 替换，需先解锁。
 
+### SSH 公钥白名单 API
+
+| 作用域 | 路由 |
+|---|---|
+| 全局新增 | `POST /api/public-keys` |
+| 全局编辑 / 删除 | `PATCH|DELETE /api/public-keys/<id>` |
+| 全局锁定 / 解锁 | `PATCH /api/public-keys/<id>/lock` |
+| 服务器专属新增 | `POST /api/servers/<host>/public-keys` |
+| 服务器专属编辑 / 删除 | `PATCH|DELETE /api/servers/<host>/public-keys/<id>` |
+| 服务器专属锁定 / 解锁 | `PATCH /api/servers/<host>/public-keys/<id>/lock` |
+
+上述路由全部要求 session 鉴权和 CSRF。`GET /api/config` 向管理员返回公钥数据；`/api/servers-public`、Guest 和公开申请接口不返回公钥。增改接口统一执行类型/Base64/内部类型/用户名校验，只保存规范化公钥、稳定 ID 和指纹。
+
 ## 五、服务器管理 API（L864-922）
 
 | 功能 | 路由 | 行号 |
@@ -96,7 +109,7 @@
 
 `POST /api/deploy` 硬拦截（非 dry_run）：调用 `get_outgoing_ip` 探测管理机本地出口 IP；若不在 `cfg["whitelist"]`（**全局**白名单）中则返回 403 且不触发 `capture_run`，防止误下发使管理机失去对目标服务器的 SSH 访问能力。口径比前端 `/api/check-my-ip` 的合并白名单更严：只接受全局，强制管理机 IP 全局可达。**跳过已禁用服务器**——目标全禁用时返回 400 不下发。
 
-**并发执行**：`/api/deploy`、`/api/remove`、`/api/status`、`/api/audit-log`、Guest 自助换 IP、`/api/applications/deploy`、调度器，对多台服务器的 `capture_run` 均通过 `_parallel_run(servers, work_fn)` 用线程池并发，最大并行度 `DEPLOY_MAX_CONCURRENCY=10`，`ex.map` 保证结果与入参同序；单台或空列表走串行分支。每个路由把原 per-server 循环体抽成 `work_fn(server)` 闭包返回结果 dict，循环外 `success_count = sum(...)`。`/api/deploy` 的管理机本地 IP 硬拦截在并发前串行执行；过滤（禁用/不受影响）也在并发前完成。`capture_run` 用 `_ThreadLocalStdout`（模块加载时 `_install_threadlocal_stdout()` 幂等安装）给每线程独立 buffer 捕获 `run_on_server` 的 print 输出，避免并发串台；未安装代理时回退全局 `redirect_stdout`。
+**并发执行**：`/api/deploy`、`/api/remove`、`/api/status`、`/api/audit-log`、Guest 自助换 IP、`/api/applications/deploy`、调度器，对多台服务器的 `capture_run` 均通过 `_parallel_run(servers, work_fn)` 用线程池并发，最大并行度 `DEPLOY_MAX_CONCURRENCY=10`，`ex.map` 保证结果与入参同序；单台或空列表走串行分支。所有触发下发的路径都会重新合并目标服务器的有效 IP 和公钥，Guest/审批只改 IP 但不会丢失已有公钥策略。启用混合模式前会检查永久锁定恢复通道。`capture_run` 用 `_ThreadLocalStdout` 给每线程独立 buffer 捕获输出，避免并发串台。
 
 ## 八、后台调度器（L537-733）
 
@@ -112,15 +125,15 @@
 
 执行逻辑：
 0. 先独立执行 `_auto_reject_stale_applications()`（兜底：超期未审批 pending 申请自动拒绝，不依赖是否有过期白名单），有变更则回写
-1. 读原始 config（不触发 load_config 写盘），扫描过期条目
-2. 有过期 → `load_config()` 触发清除+写盘 → 对受影响的**启用中**服务器重下发
+1. 读原始 config（不触发 load_config 写盘），扫描全局和服务器专属的过期 IP、公钥条目
+2. 有过期 → `load_config()` 触发清除+写盘 → 对受影响的**启用中**服务器重下发；最后一条授权过期时也下发全空拒绝策略，并在调度状态摘要中标出公钥撤权
 3. 间隔可配置（默认 5 分钟）；跳过已禁用服务器
 
 ## 九、前端模板
 
 | 文件 | 功能 |
 |---|---|
-| `templates/index.html` | 管理主界面：白名单编辑、服务器管理、下发面板、设置、审核中心、调度器控制 |
+| `templates/index.html` | 管理主界面：全局/服务器专属 IP 与公钥白名单编辑、服务器管理、下发面板、设置、审核中心、调度器控制 |
 | `templates/login.html` | 登录页面 |
 | `templates/guest.html` | Guest 自助换 IP 界面（旧 IP → 新 IP，自动替换并下发） |
 | `templates/apply.html` | 自助申请表单（IP、姓名、工号、目的、时长、目标服务器） |

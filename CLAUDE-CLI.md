@@ -10,6 +10,12 @@ whitelist_manager
 │   ├── add <ip> [--desc] [--expire] [--server]
 │   ├── remove <ip> [--server]
 │   └── list [--server]
+├── pubkey
+│   ├── add --user <user> (--key <text> | --file <file>) [--desc] [--expire] [--server] [--lock]
+│   ├── remove <id> [--server]
+│   ├── list [--server]
+│   ├── lock <id>
+│   └── unlock <id>
 ├── server
 │   ├── add <host> [--port] [--user] [--key] [--password] [--name] [--proxy]
 │   ├── remove <host>
@@ -31,6 +37,18 @@ whitelist_manager
 | 移除 IP | `cmd_ip_remove()` | L242 |
 | 查看白名单 | `cmd_ip_list()` | L268 |
 | 格式校验 | `validate_ip_or_cidr()` | L74 |
+
+### SSH 公钥白名单
+
+| 功能 | 入口函数 |
+|---|---|
+| 解析、规范化、指纹和稳定 ID | `normalize_public_key()` / `_make_public_key_entry()` |
+| 添加 / 列表 / 删除 | `cmd_pubkey_add()` / `cmd_pubkey_list()` / `cmd_pubkey_remove()` |
+| 锁定 / 解锁 | `cmd_pubkey_lock()` / `cmd_pubkey_unlock()` |
+| 合并全局与服务器专属公钥 | `get_merged_public_keys()` |
+| 检查永久锁定恢复通道 | `has_locked_recovery_path()` |
+
+公钥只保存规范化后的 `type base64`，按“Linux 用户 + 密钥 blob”去重。全局添加会清除服务器专属重复项并继承锁定状态；过期条目不会进入合并结果。
 
 ### 服务器管理
 
@@ -71,7 +89,9 @@ whitelist_manager
 | `generate_status_script()` | L558 |
 | `generate_remove_script()` | L588 |
 
-`generate_apply_script` 额外处理 firewalld 已安装但未运行：先 `systemctl start/enable` + runtime 兜底放行 ssh，失败才回退 iptables。`generate_remove_script` 的 `firewall-cmd --reload` 失败时 exit 1，确保取消失败不被误判成功。
+`generate_apply_script` 同时生成防火墙和 OpenSSH 策略：存在公钥时写入 `/etc/ssh/ip-login-whitelist/authorized_keys/%u` 和独立 drop-in，用 `Match Address` 实现 IP 命中保留原认证、非命中只允许托管公钥；仅有 IP 时使用纯防火墙模式；两类授权都为空时严格拒绝 SSH。主配置 Include、drop-in 和托管目录均按事务方式备份/替换，经 `sshd -t`、`sshd -T -C` 验证并 reload 成功后才调整防火墙，失败自动回滚。审计模式不改动公钥认证策略。
+
+`generate_apply_script` 仍处理 firewalld 已安装但未运行：先 `systemctl start/enable` + runtime 兜底放行 ssh，失败才回退 iptables。`generate_remove_script` 会先移除工具 sshd 策略、恢复原认证，再开放防火墙；托管公钥文件保留但不再生效。
 
 ## 四、SSH 执行层
 
@@ -100,7 +120,7 @@ whitelist_manager
 | `is_entry_expired()` | L124 |
 | `purge_expired_entries()` | L135 |
 
-支持：`7d`/`24h`/`30m`（相对）、`2025-12-31`/`2025-12-31 23:59:59`（绝对）、留空/`never`/`永久`（永久）。
+支持：`7d`/`24h`/`30m`（相对）、`2025-12-31`/`2025-12-31 23:59:59`（绝对）、留空/`never`/`永久`（永久）。IP 与公钥使用同一过期语义；调度器清理最后一条授权后也会下发全空拒绝策略。
 
 ## 六、全局 + 专属白名单
 

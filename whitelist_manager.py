@@ -35,6 +35,7 @@ EXEC_TIMEOUT = 120
 
 DEFAULT_CONFIG = {
     "whitelist": [],
+    "public_key_whitelist": [],
     "servers": [],
     "settings": {
         "ssh_port": 22,
@@ -76,6 +77,12 @@ def load_config(purge: bool = True) -> dict:
                 except OSError:
                     print(f"[WARN] config.json 已损坏({e})，无法备份，使用默认配置")
                 return json.loads(json.dumps(DEFAULT_CONFIG))
+            config.setdefault("whitelist", [])
+            config.setdefault("public_key_whitelist", [])
+            config.setdefault("servers", [])
+            for server in config["servers"]:
+                server.setdefault("whitelist", [])
+                server.setdefault("public_key_whitelist", [])
             if purge:
                 removed = purge_expired_entries(config)
                 if removed:
@@ -84,7 +91,8 @@ def load_config(purge: bool = True) -> dict:
                     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                         json.dump(config, f, indent=2, ensure_ascii=False)
                     for scope, e in removed:
-                        print(f"[INFO] 已自动清除过期白名单: [{scope}] {e['ip']} (过期于 {e['expire_at']})")
+                        label = e.get("ip") or f"{e.get('linux_user', '')} {e.get('fingerprint', '')}".strip()
+                        print(f"[INFO] 已自动清除过期白名单: [{scope}] {label} (过期于 {e['expire_at']})")
             _decrypt_passwords(config)
             return config
         return json.loads(json.dumps(DEFAULT_CONFIG))
@@ -162,6 +170,64 @@ def validate_ip_or_cidr(ip_str: str) -> bool:
         return False
 
 
+_PUBLIC_KEY_TYPES = {
+    "ssh-ed25519",
+    "ssh-rsa",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+}
+_LINUX_USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,30}\$?$")
+
+
+def validate_linux_user(linux_user: str) -> bool:
+    """校验可安全用于远端文件名和 getent 的 Linux 用户名。"""
+    return bool(_LINUX_USER_RE.fullmatch((linux_user or "").strip()))
+
+
+def normalize_public_key(public_key: str) -> tuple[str, bytes]:
+    """校验并规范化 OpenSSH 公钥，返回 (type + base64, decoded_blob)。
+
+    只接受无 authorized_keys options 的普通公钥；注释会被丢弃。
+    """
+    raw = (public_key or "").strip()
+    if not raw or "PRIVATE KEY" in raw:
+        raise ValueError("公钥不能为空，且不能提交私钥")
+    parts = raw.split()
+    if len(parts) < 2 or parts[0] not in _PUBLIC_KEY_TYPES:
+        raise ValueError("不支持的公钥格式、密钥类型或 authorized_keys 选项")
+    key_type, encoded = parts[0], parts[1]
+    try:
+        blob = base64.b64decode(encoded, validate=True)
+    except Exception as e:
+        raise ValueError("公钥 Base64 内容无效") from e
+    if len(blob) < 4:
+        raise ValueError("公钥内容不完整")
+    type_len = int.from_bytes(blob[:4], "big")
+    if type_len <= 0 or 4 + type_len > len(blob):
+        raise ValueError("公钥内容结构无效")
+    try:
+        embedded_type = blob[4:4 + type_len].decode("ascii")
+    except UnicodeDecodeError as e:
+        raise ValueError("公钥内部类型无效") from e
+    if embedded_type != key_type:
+        raise ValueError("公钥声明类型与内容不一致")
+    return f"{key_type} {encoded}", blob
+
+
+def _public_key_identity(public_key: str, linux_user: str) -> tuple[str, str, str]:
+    user = (linux_user or "").strip()
+    if not validate_linux_user(user):
+        raise ValueError("Linux 用户名格式无效")
+    normalized, blob = normalize_public_key(public_key)
+    digest = hashlib.sha256(blob).digest()
+    fingerprint = "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+    key_id = hashlib.sha256(user.encode() + b"\0" + blob).hexdigest()
+    return normalized, fingerprint, key_id
+
+
 # ─── 时效管理 ────────────────────────────────────────────────────────────────
 
 _EXPIRE_FMT = "%Y-%m-%d %H:%M:%S"
@@ -226,6 +292,12 @@ def purge_expired_entries(config: dict) -> list:
     config["whitelist"] = valid
     removed.extend(("全局", e) for e in expired)
 
+    valid, expired = [], []
+    for e in config.get("public_key_whitelist", []):
+        (expired if is_entry_expired(e) else valid).append(e)
+    config["public_key_whitelist"] = valid
+    removed.extend(("全局公钥", e) for e in expired)
+
     for srv in config.get("servers", []):
         valid, expired = [], []
         for e in srv.get("whitelist", []):
@@ -233,6 +305,12 @@ def purge_expired_entries(config: dict) -> list:
         srv["whitelist"] = valid
         scope = srv.get("name") or srv["host"]
         removed.extend((scope, e) for e in expired)
+
+        valid, expired = [], []
+        for e in srv.get("public_key_whitelist", []):
+            (expired if is_entry_expired(e) else valid).append(e)
+        srv["public_key_whitelist"] = valid
+        removed.extend((f"{scope} 公钥", e) for e in expired)
 
     return removed
 
@@ -268,6 +346,38 @@ def get_merged_whitelist(server: dict, global_whitelist: list) -> list:
             seen.add(entry["ip"])
             merged.append(entry)
     return merged
+
+
+def get_merged_public_keys(server: dict, global_public_keys: list) -> list:
+    """合并全局与服务器专属公钥（按用户+密钥去重、过滤过期）。"""
+    seen = set()
+    merged = []
+    for entry in global_public_keys + server.get("public_key_whitelist", []):
+        identity = entry.get("id") or (entry.get("linux_user"), entry.get("public_key"))
+        if identity not in seen and not is_entry_expired(entry):
+            seen.add(identity)
+            merged.append(entry)
+    return merged
+
+
+def _make_public_key_entry(public_key: str, linux_user: str, desc: str,
+                           expire_at: str = None, added_by: str = None,
+                           locked: bool = False) -> dict:
+    normalized, fingerprint, key_id = _public_key_identity(public_key, linux_user)
+    entry = {
+        "id": key_id,
+        "public_key": normalized,
+        "fingerprint": fingerprint,
+        "linux_user": linux_user.strip(),
+        "description": desc or "",
+        "added_by": added_by or getpass.getuser(),
+        "added_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if expire_at:
+        entry["expire_at"] = expire_at
+    if locked:
+        entry["locked"] = True
+    return entry
 
 
 def cmd_ip_add(args):
@@ -392,6 +502,124 @@ def cmd_ip_list(args):
     print(f"\n共 {len(wl)} 条记录")
 
 
+def _read_public_key_arg(args) -> str:
+    if getattr(args, "key_file", None):
+        try:
+            return Path(args.key_file).expanduser().read_text(encoding="utf-8").strip()
+        except OSError as e:
+            print(f"[ERROR] 无法读取公钥文件: {e}")
+            sys.exit(1)
+    return getattr(args, "public_key", "") or ""
+
+
+def cmd_pubkey_add(args):
+    config = load_config()
+    try:
+        expire_at = parse_expire(args.expire) if args.expire else None
+        entry = _make_public_key_entry(
+            _read_public_key_arg(args), args.user, args.desc, expire_at,
+            locked=args.lock,
+        )
+    except ValueError as e:
+        print(f"[ERROR] {e}")
+        sys.exit(1)
+
+    if args.server:
+        srv = _find_server(config, args.server)
+        if not srv:
+            print(f"[ERROR] 未找到服务器: {args.server}")
+            sys.exit(1)
+        wl = srv.setdefault("public_key_whitelist", [])
+        if any(e.get("id") == entry["id"] for e in wl):
+            print(f"[WARN] {entry['fingerprint']} 已在 {srv['name']} 的公钥白名单中，跳过")
+            return
+        wl.append(entry)
+        label = f"{srv['name']} 的专属公钥白名单"
+    else:
+        wl = config.setdefault("public_key_whitelist", [])
+        if any(e.get("id") == entry["id"] for e in wl):
+            print(f"[WARN] {entry['fingerprint']} 已在全局公钥白名单中，跳过")
+            return
+        inherited_locked = False
+        for srv in config.get("servers", []):
+            current = srv.get("public_key_whitelist", [])
+            inherited_locked = inherited_locked or any(
+                e.get("id") == entry["id"] and e.get("locked") for e in current
+            )
+            srv["public_key_whitelist"] = [e for e in current if e.get("id") != entry["id"]]
+        if inherited_locked:
+            entry["locked"] = True
+        wl.append(entry)
+        label = "全局公钥白名单"
+    save_config(config)
+    print(f"[OK] 已添加 {entry['linux_user']} {entry['fingerprint']} 到{label}")
+
+
+def _find_public_key_entry(config: dict, key_id: str, server_name: str = None):
+    if server_name:
+        srv = _find_server(config, server_name)
+        if not srv:
+            return None, None
+        return srv, next((e for e in srv.get("public_key_whitelist", []) if e.get("id") == key_id), None)
+    return config, next((e for e in config.get("public_key_whitelist", []) if e.get("id") == key_id), None)
+
+
+def cmd_pubkey_remove(args):
+    config = load_config()
+    owner, entry = _find_public_key_entry(config, args.id, args.server)
+    if owner is None:
+        print(f"[ERROR] 未找到服务器: {args.server}")
+        sys.exit(1)
+    if not entry:
+        print(f"[WARN] 未找到公钥 ID: {args.id}")
+        return
+    if entry.get("locked"):
+        print("[ERROR] 公钥已锁定，请先解锁")
+        sys.exit(1)
+    owner["public_key_whitelist"] = [e for e in owner.get("public_key_whitelist", []) if e.get("id") != args.id]
+    save_config(config)
+    print(f"[OK] 已移除 {entry['linux_user']} {entry['fingerprint']}")
+
+
+def cmd_pubkey_list(args):
+    config = load_config()
+    if args.server:
+        srv = _find_server(config, args.server)
+        if not srv:
+            print(f"[ERROR] 未找到服务器: {args.server}")
+            sys.exit(1)
+        wl = srv.get("public_key_whitelist", [])
+        label = f"{srv['name']} 的专属公钥白名单"
+    else:
+        wl = config.get("public_key_whitelist", [])
+        label = "全局公钥白名单"
+    print(f"\n── {label} ──")
+    if not wl:
+        print("(空)")
+        return
+    for e in wl:
+        expires = e.get("expire_at") or "永久"
+        lock = " [锁定]" if e.get("locked") else ""
+        print(f"{e['id']}  {e['linux_user']}  {e['fingerprint']}  {expires}{lock}  {e.get('description', '')}")
+
+
+def cmd_pubkey_lock(args):
+    config = load_config()
+    owner, entry = _find_public_key_entry(config, args.id, args.server)
+    if owner is None:
+        print(f"[ERROR] 未找到服务器: {args.server}")
+        sys.exit(1)
+    if not entry:
+        print(f"[ERROR] 未找到公钥 ID: {args.id}")
+        sys.exit(1)
+    if args.pubkey_command == "lock":
+        entry["locked"] = True
+    else:
+        entry.pop("locked", None)
+    save_config(config)
+    print(f"[OK] 已{'锁定' if args.pubkey_command == 'lock' else '解锁'} {entry['fingerprint']}")
+
+
 # ─── 服务器管理 ───────────────────────────────────────────────────────────────
 
 def cmd_server_add(args):
@@ -412,6 +640,7 @@ def cmd_server_add(args):
         "password": args.password or "",
         "proxy": args.proxy or "",
         "whitelist": [],
+        "public_key_whitelist": [],
         "enabled": True
     }
     config["servers"].append(server)
@@ -452,8 +681,43 @@ def cmd_server_list(args):
 
 # ─── 生成远端执行脚本 ─────────────────────────────────────────────────────────
 
-def generate_apply_script(whitelist: list, ssh_port: int, persist: bool, audit: bool = False) -> str:
+def generate_apply_script(whitelist: list, ssh_port: int, persist: bool, audit: bool = False,
+                          public_keys: list = None) -> str:
     ip_array_lines = "\n".join(f'"{e["ip"]}"' for e in whitelist)
+    public_keys = [e for e in (public_keys or []) if not is_entry_expired(e)]
+    keys_by_user = {}
+    for entry in public_keys:
+        user = entry["linux_user"]
+        if not validate_linux_user(user):
+            raise ValueError(f"无效的公钥 Linux 用户名: {user}")
+        normalized, _ = normalize_public_key(entry["public_key"])
+        keys_by_user.setdefault(user, []).append(normalized)
+    key_users = list(keys_by_user)
+    key_user_lines = "\n".join(f'"{u}"' for u in key_users)
+    key_payload_lines = "\n".join(
+        f'"{base64.b64encode((chr(10).join(keys_by_user[u]) + chr(10)).encode()).decode()}"'
+        for u in key_users
+    )
+    if whitelist:
+        match_address = "*," + ",".join(f'!{e["ip"]}' for e in whitelist)
+    else:
+        match_address = "*"
+    allowed_test_ip = ""
+    if whitelist:
+        network = ipaddress.ip_network(whitelist[0]["ip"], strict=False)
+        allowed_test_ip = str(next(iter(network.hosts()), network.network_address))
+    outside_test_ip = ""
+    networks = []
+    for entry in whitelist:
+        try:
+            networks.append(ipaddress.ip_network(entry["ip"], strict=False))
+        except ValueError:
+            pass
+    for candidate in ("198.51.100.254", "203.0.113.254", "192.0.2.254", "8.8.8.8"):
+        addr = ipaddress.ip_address(candidate)
+        if not any(addr.version == net.version and addr in net for net in networks):
+            outside_test_ip = candidate
+            break
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     mode_label = "审计模式（只记录，不拦截）" if audit else "生产模式（真实拦截）"
 
@@ -466,15 +730,178 @@ SSH_PORT={ssh_port}
 WHITELIST_IPS=(
 {ip_array_lines}
 )
+PUBLIC_KEY_USERS=(
+{key_user_lines}
+)
+PUBLIC_KEY_PAYLOADS=(
+{key_payload_lines}
+)
 CHAIN="SSH_WHITELIST"
 PERSIST={str(persist).lower()}
 AUDIT={str(audit).lower()}
+HYBRID_MODE={str(bool(public_keys)).lower()}
+MATCH_ADDRESS="{match_address}"
+ALLOWED_TEST_IP="{allowed_test_ip}"
+OUTSIDE_TEST_IP="{outside_test_ip}"
+MANAGED_ROOT="/etc/ssh/ip-login-whitelist"
+MANAGED_KEYS="$MANAGED_ROOT/authorized_keys"
+SSHD_MAIN="/etc/ssh/sshd_config"
+SSHD_DROPIN="/etc/ssh/sshd_config.d/90-ip-login-whitelist.conf"
+SSHD_INCLUDE_MARKER="# ip-login-whitelist managed include"
 
 echo "=== 开始部署 SSH IP 白名单 [{mode_label}] ==="
 echo "服务器: $(hostname)  系统: $(. /etc/os-release 2>/dev/null && echo $NAME $VERSION_ID || uname -r)"
 echo "SSH 端口: $SSH_PORT"
 echo "白名单 IP: ${{WHITELIST_IPS[*]}}"
+echo "托管公钥: ${{#PUBLIC_KEY_USERS[@]}} 个 Linux 用户"
 echo ""
+
+SSHD_BIN=$(command -v sshd 2>/dev/null || true)
+[ -n "$SSHD_BIN" ] || [ ! -x /usr/sbin/sshd ] || SSHD_BIN=/usr/sbin/sshd
+
+reload_sshd() {{
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || \
+        service sshd reload 2>/dev/null || service ssh reload 2>/dev/null || \
+        pkill -HUP -x sshd 2>/dev/null
+}}
+
+restore_sshd_backup() {{
+    local backup="$1"
+    cp -a "$backup/sshd_config" "$SSHD_MAIN"
+    if [ -e "$backup/dropin" ]; then
+        mkdir -p "$(dirname "$SSHD_DROPIN")"
+        cp -a "$backup/dropin" "$SSHD_DROPIN"
+    else
+        rm -f "$SSHD_DROPIN"
+    fi
+    rm -rf "$MANAGED_ROOT"
+    [ ! -d "$backup/managed_root" ] || cp -a "$backup/managed_root" "$MANAGED_ROOT"
+    "$SSHD_BIN" -t && reload_sshd
+}}
+
+enable_managed_public_keys() {{
+    [ -n "$SSHD_BIN" ] || {{ echo "[ERROR] 未找到 sshd，无法启用公钥白名单"; return 1; }}
+    [ -f "$SSHD_MAIN" ] || {{ echo "[ERROR] 未找到 $SSHD_MAIN"; return 1; }}
+    for user in "${{PUBLIC_KEY_USERS[@]}}"; do
+        getent passwd "$user" >/dev/null || {{ echo "[ERROR] Linux 用户不存在: $user"; return 1; }}
+    done
+
+    local backup stage first_match include_line idx user effective_allowed effective_outside
+    backup=$(mktemp -d /tmp/ip-login-whitelist-backup.XXXXXX) || return 1
+    stage=$(mktemp -d /tmp/ip-login-whitelist-stage.XXXXXX) || {{ rm -rf "$backup"; return 1; }}
+    cp -a "$SSHD_MAIN" "$backup/sshd_config"
+    [ ! -e "$SSHD_DROPIN" ] || cp -a "$SSHD_DROPIN" "$backup/dropin"
+    [ ! -d "$MANAGED_ROOT" ] || cp -a "$MANAGED_ROOT" "$backup/managed_root"
+
+    mkdir -p "$stage/authorized_keys" /etc/ssh/sshd_config.d
+    chmod 0755 "$stage" "$stage/authorized_keys"
+    idx=0
+    for user in "${{PUBLIC_KEY_USERS[@]}}"; do
+        printf '%s' "${{PUBLIC_KEY_PAYLOADS[$idx]}}" | base64 -d > "$stage/authorized_keys/$user" || {{ rm -rf "$backup" "$stage"; return 1; }}
+        chmod 0644 "$stage/authorized_keys/$user"
+        idx=$((idx + 1))
+    done
+
+    cat > "$stage/90-ip-login-whitelist.conf" <<EOF_SSHD
+# Managed by ip-login-whitelist. Do not edit.
+Match Address $MATCH_ADDRESS
+    AuthenticationMethods publickey
+    PubkeyAuthentication yes
+    AuthorizedKeysFile /etc/ssh/ip-login-whitelist/authorized_keys/%u
+    AuthorizedKeysCommand none
+    TrustedUserCAKeys none
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    HostbasedAuthentication no
+    GSSAPIAuthentication no
+    KerberosAuthentication no
+Match all
+EOF_SSHD
+    chmod 0644 "$stage/90-ip-login-whitelist.conf"
+
+    first_match=$(grep -nEi '^[[:space:]]*Match[[:space:]]' "$SSHD_MAIN" | head -1 | cut -d: -f1)
+    include_line=$(grep -nEi '^[[:space:]]*Include[[:space:]].*sshd_config\\.d/(\\*\\.conf|90-ip-login-whitelist\\.conf)' "$SSHD_MAIN" | head -1 | cut -d: -f1)
+    if [ -z "$include_line" ] || {{ [ -n "$first_match" ] && [ "$include_line" -gt "$first_match" ]; }}; then
+        awk -v marker="$SSHD_INCLUDE_MARKER" '
+            BEGIN {{ inserted=0 }}
+            /^[[:space:]]*[Mm][Aa][Tt][Cc][Hh][[:space:]]/ && !inserted {{
+                print marker; print "Include /etc/ssh/sshd_config.d/90-ip-login-whitelist.conf"; inserted=1
+            }}
+            {{ print }}
+            END {{ if (!inserted) {{ print marker; print "Include /etc/ssh/sshd_config.d/90-ip-login-whitelist.conf" }} }}
+        ' "$SSHD_MAIN" > "$stage/sshd_config"
+        cp "$stage/sshd_config" "$SSHD_MAIN"
+    fi
+
+    mkdir -p "$MANAGED_ROOT"
+    rm -rf "$MANAGED_KEYS"
+    cp -a "$stage/authorized_keys" "$MANAGED_KEYS"
+    cp "$stage/90-ip-login-whitelist.conf" "$SSHD_DROPIN"
+    chown -R root:root "$MANAGED_ROOT" "$SSHD_DROPIN" 2>/dev/null || true
+
+    if ! "$SSHD_BIN" -t; then
+        echo "[ERROR] sshd -t 校验失败，正在回滚"
+        restore_sshd_backup "$backup" || true
+        rm -rf "$backup" "$stage"
+        return 1
+    fi
+    if [ -n "$OUTSIDE_TEST_IP" ]; then
+        effective_outside=$("$SSHD_BIN" -T -C "user=${{PUBLIC_KEY_USERS[0]}},addr=$OUTSIDE_TEST_IP,host=localhost" 2>/dev/null)
+        echo "$effective_outside" | grep -q '^authenticationmethods publickey$' && \
+        echo "$effective_outside" | grep -q '^authorizedkeysfile /etc/ssh/ip-login-whitelist/authorized_keys/%u$' || {{
+            echo "[ERROR] sshd -T 显示非白名单 IP 未进入托管公钥策略，正在回滚"
+            restore_sshd_backup "$backup" || true
+            rm -rf "$backup" "$stage"
+            return 1
+        }}
+    fi
+    if [ -n "$ALLOWED_TEST_IP" ]; then
+        effective_allowed=$("$SSHD_BIN" -T -C "user=${{PUBLIC_KEY_USERS[0]}},addr=$ALLOWED_TEST_IP,host=localhost" 2>/dev/null)
+        if echo "$effective_allowed" | grep -q '^authorizedkeysfile /etc/ssh/ip-login-whitelist/authorized_keys/%u$'; then
+            echo "[ERROR] 白名单 IP 仍被限制为托管公钥，正在回滚"
+            restore_sshd_backup "$backup" || true
+            rm -rf "$backup" "$stage"
+            return 1
+        fi
+    fi
+    if ! reload_sshd; then
+        echo "[ERROR] SSH 服务 reload 失败，正在回滚"
+        restore_sshd_backup "$backup" || true
+        rm -rf "$backup" "$stage"
+        return 1
+    fi
+    rm -rf "$backup" "$stage"
+    echo "[OK] sshd 托管公钥策略已通过语法、有效配置与 reload 校验"
+}}
+
+disable_managed_public_keys() {{
+    [ -e "$SSHD_DROPIN" ] || grep -qF "$SSHD_INCLUDE_MARKER" "$SSHD_MAIN" 2>/dev/null || return 0
+    [ -n "$SSHD_BIN" ] || {{ echo "[ERROR] 未找到 sshd，无法恢复原认证"; return 1; }}
+    local backup stage
+    backup=$(mktemp -d /tmp/ip-login-whitelist-backup.XXXXXX) || return 1
+    stage=$(mktemp -d /tmp/ip-login-whitelist-stage.XXXXXX) || {{ rm -rf "$backup"; return 1; }}
+    cp -a "$SSHD_MAIN" "$backup/sshd_config"
+    [ ! -d "$MANAGED_ROOT" ] || cp -a "$MANAGED_ROOT" "$backup/managed_root"
+    awk -v marker="$SSHD_INCLUDE_MARKER" '
+        $0 == marker {{ skip=1; next }}
+        skip && $0 == "Include /etc/ssh/sshd_config.d/90-ip-login-whitelist.conf" {{ skip=0; next }}
+        {{ skip=0; print }}
+    ' "$SSHD_MAIN" > "$stage/sshd_config"
+    cp "$stage/sshd_config" "$SSHD_MAIN"
+    rm -f "$SSHD_DROPIN"
+    if ! "$SSHD_BIN" -t || ! reload_sshd; then
+        echo "[ERROR] 恢复原 SSH 认证失败，正在回滚"
+        restore_sshd_backup "$backup" || true
+        rm -rf "$backup" "$stage"
+        return 1
+    fi
+    rm -rf "$backup" "$stage"
+    echo "[OK] 已恢复服务器原 SSH 认证配置（托管公钥文件保留）"
+}}
+
+if [ "$AUDIT" != "true" ] && [ "$HYBRID_MODE" = "true" ]; then
+    enable_managed_public_keys || exit 1
+fi
 
 # ── 检测防火墙管理器 ──────────────────────────────────────────
 USE_FIREWALLD=false
@@ -526,10 +953,10 @@ if [ "$USE_FIREWALLD" = "true" ]; then
         fi
         # 记录所有 SSH 连接（含白名单和非白名单），用于验证识别效果
         firewall-cmd --permanent --add-rich-rule="rule family=ipv4 port port=\\"$SSH_PORT\\" protocol=tcp log prefix=\\"SSH_AUDIT\\" level=\\"warning\\""
-        # 单独记录白名单 IP（日志前缀不同，方便区分）
+       # 单独记录白名单 IP（日志前缀不同，方便区分）
         for ip in "${{WHITELIST_IPS[@]}}"; do
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=\\"$ip\\" port port=\\"$SSH_PORT\\" protocol=tcp log prefix=\\"SSH_ALLOWED: \\" level=\\"info\\""
-            echo "[+] 白名单 IP（审计）: $ip"
+           firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=\\"$ip\\" port port=\\"$SSH_PORT\\" protocol=tcp log prefix=\\"SSH_ALLOWED: \\" level=\\"info\\""
+           echo "[+] 白名单 IP（审计）: $ip"
         done
         echo ""
         echo "[审计模式] 所有 SSH 连接均会放行，但会记录日志："
@@ -538,14 +965,19 @@ if [ "$USE_FIREWALLD" = "true" ]; then
         echo "  查看日志: journalctl -k | grep 'SSH_AUDIT\\|SSH_ALLOWED'"
     else
         # 生产模式：移除默认 ssh service，改为精确白名单控制
-        if firewall-cmd --list-services 2>/dev/null | grep -qw ssh; then
-            firewall-cmd --permanent --remove-service=ssh
-            echo "[INFO] 已移除默认 ssh service 开放"
+       if firewall-cmd --list-services 2>/dev/null | grep -qw ssh; then
+           firewall-cmd --permanent --remove-service=ssh
+           echo "[INFO] 已移除默认 ssh service 开放"
+       fi
+        if [ "$HYBRID_MODE" = "true" ]; then
+            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 port port=\\"$SSH_PORT\\" protocol=tcp accept"
+            echo "[+] 混合模式：SSH 端口交由 sshd 按 IP 或托管公钥认证"
+        else
+            for ip in "${{WHITELIST_IPS[@]}}"; do
+                firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=\\"$ip\\" port port=\\"$SSH_PORT\\" protocol=tcp accept"
+                echo "[+] 允许 IP: $ip"
+            done
         fi
-        for ip in "${{WHITELIST_IPS[@]}}"; do
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=\\"$ip\\" port port=\\"$SSH_PORT\\" protocol=tcp accept"
-            echo "[+] 允许 IP: $ip"
-        done
     fi
 
     firewall-cmd --reload
@@ -553,6 +985,9 @@ if [ "$USE_FIREWALLD" = "true" ]; then
     echo "[OK] firewalld 规则已应用"
     echo "当前 SSH 相关 rich-rule:"
     firewall-cmd --list-rich-rules | grep "$SSH_PORT" || echo "(无 rich-rule)"
+    if [ "$AUDIT" != "true" ] && [ "$HYBRID_MODE" != "true" ]; then
+        disable_managed_public_keys || exit 1
+    fi
     echo "=== 部署完成 ==="
     exit 0
 fi
@@ -568,11 +1003,16 @@ fi
 iptables -F "$CHAIN" 2>/dev/null || iptables -N "$CHAIN"
 iptables -F "$CHAIN"
 
-# 添加白名单 IP
-for ip in "${{WHITELIST_IPS[@]}}"; do
-    iptables -A "$CHAIN" -s "$ip" -j ACCEPT
-    echo "[+] 允许 IP: $ip"
-done
+# 添加白名单 IP；混合模式由 sshd 做 OR 判断，防火墙放行到认证层
+if [ "$HYBRID_MODE" = "true" ] && [ "$AUDIT" != "true" ]; then
+    iptables -A "$CHAIN" -j ACCEPT
+    echo "[+] 混合模式：SSH 端口交由 sshd 按 IP 或托管公钥认证"
+else
+    for ip in "${{WHITELIST_IPS[@]}}"; do
+        iptables -A "$CHAIN" -s "$ip" -j ACCEPT
+        echo "[+] 允许 IP: $ip"
+    done
+fi
 
 if [ "$AUDIT" = "true" ]; then
     # 审计模式：对非白名单 IP 只记录日志，不拦截
@@ -593,6 +1033,10 @@ iptables -I INPUT 1 -p tcp --dport "$SSH_PORT" -j "$CHAIN"
 
 echo "[OK] iptables 规则已应用"
 iptables -L "$CHAIN" -n --line-numbers
+
+if [ "$AUDIT" != "true" ] && [ "$HYBRID_MODE" != "true" ]; then
+    disable_managed_public_keys || exit 1
+fi
 
 # ── 持久化 iptables 规则 ──────────────────────────────────────
 if [ "$PERSIST" = "true" ] && command -v iptables-save &>/dev/null; then
@@ -680,6 +1124,27 @@ echo "系统: $(. /etc/os-release 2>/dev/null && echo $NAME $VERSION_ID || uname
 echo "时间: $(date)"
 echo ""
 
+SSHD_DROPIN=/etc/ssh/sshd_config.d/90-ip-login-whitelist.conf
+MANAGED_KEYS=/etc/ssh/ip-login-whitelist/authorized_keys
+if [ -f "$SSHD_DROPIN" ]; then
+    echo "[认证模式] IP 或托管公钥"
+    echo "sshd 托管策略: $SSHD_DROPIN"
+    grep -E '^(Match Address|[[:space:]]*(AuthenticationMethods|AuthorizedKeysFile|PasswordAuthentication))' "$SSHD_DROPIN" || true
+    echo "托管公钥文件:"
+    if [ -d "$MANAGED_KEYS" ]; then
+        for f in "$MANAGED_KEYS"/*; do
+            [ -f "$f" ] || continue
+            echo "  $(basename "$f"): $(grep -cve '^[[:space:]]*$' "$f") 把"
+            command -v ssh-keygen >/dev/null && ssh-keygen -lf "$f" 2>/dev/null | sed 's/^/    /' || true
+        done
+    else
+        echo "  (无)"
+    fi
+else
+    echo "[认证模式] 纯 IP 白名单 / 原 SSH 认证"
+fi
+echo ""
+
 if systemctl is-active --quiet firewalld 2>/dev/null; then
     echo "[模式] firewalld"
     echo "SSH 相关 rich-rule:"
@@ -705,6 +1170,42 @@ fi
 def generate_remove_script(ssh_port: int) -> str:
     return f"""#!/bin/bash
 echo "=== 移除 SSH IP 白名单 ==="
+
+SSHD_MAIN=/etc/ssh/sshd_config
+SSHD_DROPIN=/etc/ssh/sshd_config.d/90-ip-login-whitelist.conf
+SSHD_INCLUDE_MARKER="# ip-login-whitelist managed include"
+SSHD_BIN=$(command -v sshd 2>/dev/null || true)
+[ -n "$SSHD_BIN" ] || [ ! -x /usr/sbin/sshd ] || SSHD_BIN=/usr/sbin/sshd
+
+reload_sshd() {{
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || \
+        service sshd reload 2>/dev/null || service ssh reload 2>/dev/null || \
+        pkill -HUP -x sshd 2>/dev/null
+}}
+
+if [ -e "$SSHD_DROPIN" ] || grep -qF "$SSHD_INCLUDE_MARKER" "$SSHD_MAIN" 2>/dev/null; then
+    [ -n "$SSHD_BIN" ] || {{ echo "[ERROR] 未找到 sshd，拒绝在认证未恢复时开放防火墙"; exit 1; }}
+    BACKUP=$(mktemp -d /tmp/ip-login-whitelist-remove.XXXXXX) || exit 1
+    cp -a "$SSHD_MAIN" "$BACKUP/sshd_config"
+    [ ! -e "$SSHD_DROPIN" ] || cp -a "$SSHD_DROPIN" "$BACKUP/dropin"
+    awk -v marker="$SSHD_INCLUDE_MARKER" '
+        $0 == marker {{ skip=1; next }}
+        skip && $0 == "Include /etc/ssh/sshd_config.d/90-ip-login-whitelist.conf" {{ skip=0; next }}
+        {{ skip=0; print }}
+    ' "$SSHD_MAIN" > "$BACKUP/sshd_config.new"
+    cp "$BACKUP/sshd_config.new" "$SSHD_MAIN"
+    rm -f "$SSHD_DROPIN"
+    if ! "$SSHD_BIN" -t || ! reload_sshd; then
+        cp -a "$BACKUP/sshd_config" "$SSHD_MAIN"
+        [ ! -e "$BACKUP/dropin" ] || cp -a "$BACKUP/dropin" "$SSHD_DROPIN"
+        "$SSHD_BIN" -t && reload_sshd || true
+        rm -rf "$BACKUP"
+        echo "[ERROR] 恢复原 SSH 认证失败，防火墙保持不变"
+        exit 1
+    fi
+    rm -rf "$BACKUP"
+    echo "[OK] 已恢复原 SSH 认证；托管公钥文件保留但不再生效"
+fi
 
 if systemctl is-active --quiet firewalld 2>/dev/null; then
     echo "[模式] firewalld"
@@ -1104,6 +1605,47 @@ def ip_covered_by_whitelist(ip_str: str, whitelist: list) -> bool:
     return False
 
 
+def _public_key_from_private_file(key_file: str) -> str | None:
+    """用 ssh-keygen 从本地私钥导出公钥；无法证明时返回 None。"""
+    if not key_file:
+        return None
+    path = os.path.expanduser(key_file)
+    if not os.path.isfile(path):
+        return None
+    try:
+        result = subprocess.run(
+            ["ssh-keygen", "-y", "-f", path], capture_output=True, text=True,
+            timeout=10, check=False,
+        )
+        if result.returncode != 0:
+            return None
+        normalized, _ = normalize_public_key(result.stdout)
+        return normalized
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def has_locked_recovery_path(server: dict, outgoing_ip: str | None,
+                             global_whitelist: list, merged_public_keys: list) -> bool:
+    """混合模式首次下发前，证明存在永久锁定的管理 IP 或管理密钥。"""
+    permanent_locked_ips = [
+        e for e in global_whitelist if e.get("locked") and not e.get("expire_at")
+    ]
+    if outgoing_ip and ip_covered_by_whitelist(outgoing_ip, permanent_locked_ips):
+        return True
+    management_key = _public_key_from_private_file(server.get("key_file", ""))
+    if not management_key:
+        return False
+    user = server.get("user", "root")
+    return any(
+        e.get("linux_user") == user
+        and e.get("public_key") == management_key
+        and e.get("locked")
+        and not e.get("expire_at")
+        for e in merged_public_keys
+    )
+
+
 def get_target_servers(config: dict, host_filter: str = None) -> list:
     servers = config["servers"]
     if not servers:
@@ -1120,6 +1662,7 @@ def get_target_servers(config: dict, host_filter: str = None) -> list:
 def cmd_deploy(args):
     config = load_config()
     whitelist = config["whitelist"]
+    global_public_keys = config.get("public_key_whitelist", [])
 
     servers = get_target_servers(config, args.server)
 
@@ -1138,9 +1681,11 @@ def cmd_deploy(args):
 
     # 预先计算每台服务器的合并白名单，基于合并结果做安全检查和显示
     server_merged_map = {s["host"]: get_merged_whitelist(s, whitelist) for s in servers}
+    server_key_map = {s["host"]: get_merged_public_keys(s, global_public_keys) for s in servers}
 
-    if all(not m for m in server_merged_map.values()):
-        print("[ERROR] 白名单为空！部署后将阻断所有 SSH 连接，请先用 `ip add` 添加允许的 IP。")
+    if all(not server_merged_map[s["host"]] and not server_key_map[s["host"]] for s in servers):
+        print("[ERROR] 白名单为空：IP 与公钥白名单均无有效条目，手动部署将阻断所有 SSH 登录。")
+        print("严格撤权仅由过期调度执行；请先添加恢复通道或有效白名单条目。")
         sys.exit(1)
 
     print(f"\n[安全检查] 各服务器实际下发白名单（全局 + 专属）:")
@@ -1152,6 +1697,8 @@ def cmd_deploy(args):
         for e in merged:
             tag = " [专属]" if e["ip"] in server_ips else ""
             print(f"    - {e['ip']}{tag}  {e.get('description', '')}")
+        for e in server_key_map[s["host"]]:
+            print(f"    - [公钥] {e['linux_user']} {e['fingerprint']}  {e.get('description', '')}")
 
     print(f"\n将部署到 {len(servers)} 台服务器:")
     for s in servers:
@@ -1161,9 +1708,22 @@ def cmd_deploy(args):
     first_host = servers[0]["host"] if servers else None
     my_ip = get_outgoing_ip(first_host)
     locked_out_servers = []
+    audit = getattr(args, "audit", False)
+    unsafe_hybrid = [
+        s for s in servers
+        if server_key_map[s["host"]] and not audit and not args.dry_run
+        and not has_locked_recovery_path(s, my_ip, whitelist, server_key_map[s["host"]])
+    ]
+    if unsafe_hybrid:
+        print("\n[ERROR] 以下服务器缺少永久锁定的恢复通道，拒绝启用 IP/公钥混合模式：")
+        for s in unsafe_hybrid:
+            print(f"  - {s.get('name', s['host'])} ({s['host']})")
+        print("请锁定管理机全局 IP，或将 server.key_file 对应公钥以管理用户身份永久锁定。")
+        sys.exit(1)
     if my_ip:
         for s in servers:
-            if not ip_covered_by_whitelist(my_ip, server_merged_map[s["host"]]):
+            if (not ip_covered_by_whitelist(my_ip, server_merged_map[s["host"]])
+                    and not has_locked_recovery_path(s, my_ip, whitelist, server_key_map[s["host"]])):
                 locked_out_servers.append(s)
         if locked_out_servers:
             print(f"\n{'!'*60}")
@@ -1189,7 +1749,6 @@ def cmd_deploy(args):
             print("已取消")
             return
 
-    audit = getattr(args, "audit", False)
     if audit:
         print("\n[审计模式] 所有 SSH 连接仍可正常登录，非白名单 IP 将被记录到系统日志")
         print("  验证完成后，用 deploy（不加 --audit）切换为真实拦截\n")
@@ -1197,7 +1756,10 @@ def cmd_deploy(args):
     success_count = 0
     for server in servers:
         merged = server_merged_map[server["host"]]
-        script = generate_apply_script(merged, ssh_port, persist, audit=audit)
+        script = generate_apply_script(
+            merged, ssh_port, persist, audit=audit,
+            public_keys=server_key_map[server["host"]],
+        )
         if run_on_server(server, script, dry_run=args.dry_run, config=config):
             success_count += 1
 
@@ -1321,6 +1883,36 @@ def build_parser() -> argparse.ArgumentParser:
     ip_ls = ip_sub.add_parser("list", help="查看白名单")
     ip_ls.add_argument("--server", "-s", help="查看指定服务器的专属白名单（不指定则为全局）")
     ip_ls.set_defaults(func=cmd_ip_list)
+
+    # pubkey 子命令
+    key_parser = sub.add_parser("pubkey", help="管理 SSH 公钥白名单")
+    key_sub = key_parser.add_subparsers(dest="pubkey_command", required=True)
+
+    key_add = key_sub.add_parser("add", help="添加公钥到白名单")
+    key_add.add_argument("--user", required=True, help="远端 Linux 用户名")
+    key_source = key_add.add_mutually_exclusive_group(required=True)
+    key_source.add_argument("--key", dest="public_key", help="OpenSSH 公钥文本")
+    key_source.add_argument("--file", dest="key_file", help=".pub 公钥文件路径")
+    key_add.add_argument("--desc", "-d", default="", help="备注说明")
+    key_add.add_argument("--expire", "-e", help="有效期，格式同 ip add")
+    key_add.add_argument("--server", "-s", help="服务器专属公钥；不指定则为全局")
+    key_add.add_argument("--lock", action="store_true", help="添加后立即锁定")
+    key_add.set_defaults(func=cmd_pubkey_add)
+
+    key_ls = key_sub.add_parser("list", help="查看公钥白名单")
+    key_ls.add_argument("--server", "-s", help="查看服务器专属公钥")
+    key_ls.set_defaults(func=cmd_pubkey_list)
+
+    key_rm = key_sub.add_parser("remove", help="移除公钥")
+    key_rm.add_argument("id", help="公钥条目 ID")
+    key_rm.add_argument("--server", "-s", help="从服务器专属公钥白名单移除")
+    key_rm.set_defaults(func=cmd_pubkey_remove)
+
+    for command in ("lock", "unlock"):
+        key_lock = key_sub.add_parser(command, help=f"{command} 公钥")
+        key_lock.add_argument("id", help="公钥条目 ID")
+        key_lock.add_argument("--server", "-s", help="服务器专属公钥")
+        key_lock.set_defaults(func=cmd_pubkey_lock)
 
     # server 子命令
     srv_parser = sub.add_parser("server", help="管理服务器列表")

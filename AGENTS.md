@@ -28,7 +28,7 @@
 
 1. **配置层** `load_config`/`save_config` — 读写 `config.json`，加载时自动清除过期条目
 2. **子命令处理层** `cmd_ip_*`/`cmd_server_*`/`cmd_deploy`/`cmd_status`/`cmd_remove`/`cmd_settings`/`cmd_audit_log`
-3. **脚本生成层** `generate_apply_script`/`generate_status_script`/`generate_remove_script`/`generate_audit_log_script` — 返回 bash 脚本字符串，远端自动检测 firewalld/iptables
+3. **脚本生成层** `generate_apply_script`/`generate_status_script`/`generate_remove_script`/`generate_audit_log_script` — 返回 bash 脚本字符串，远端自动检测 firewalld/iptables，并事务管理 OpenSSH 公钥策略
 4. **SSH 执行层** `run_on_server` → `_run_via_paramiko`/`_run_via_subprocess` — 优先 paramiko，降级 subprocess
 5. **CLI 入口** `build_parser`/`main` — argparse 两级子命令树
 
@@ -43,6 +43,9 @@
 ## 关键设计点
 
 - **双层白名单**：全局白名单 + 每台服务器可配专属白名单，下发时合并去重，过期条目不进入合并；添加全局 IP 时若各服务器专属白名单中存在同 IP，自动清除重复并继承其锁定状态（防"提升到全局"绕过锁定）
+- **IP 或 SSH 公钥放行**：来源 IP 命中有效 IP 白名单时保留服务器原认证方式；否则仅允许与 Linux 用户匹配的有效托管公钥。公钥同样采用全局 + 服务器专属合并，按“用户 + 密钥”去重
+- **独立公钥存储**：托管公钥写入 `/etc/ssh/ip-login-whitelist/authorized_keys/%u`，只由工具生成的 sshd `Match Address` 策略引用，绝不读写用户原有 `~/.ssh/authorized_keys`
+- **混合模式事务下发**：先校验 Linux 用户、恢复通道、`sshd -t` 和 `sshd -T -C`，原子替换并 reload sshd 成功后才开放防火墙；任何失败恢复工具原策略。最后一条授权过期时会严格下发拒绝所有 SSH
 - **时效管理**：`parse_expire()` 支持 `7d`/`24h`/`30m`（相对）、`2025-12-31`（绝对）、留空（永久）；`load_config()` 加载时自动清除过期条目
 - **条目锁定**：白名单条目可设 `locked: true`，锁定后无法被 Web 编辑/删除、Guest 自助换 IP 替换、或 `type=replace` 申请的审批删除；防止误把关键 IP（如管理服务器自身 IP）改掉导致回连失败
 - **服务器启用/禁用开关**：每台服务器 `enabled` 字段（缺省 true，兼容旧配置）。禁用 → 先远端取消白名单，成功才标记禁用，失败回滚保持启用（502）；启用 → 仅恢复 flag，不自动下发。禁用的服务器在手动下发、审核下发、审核批准、Guest 换 IP、自动调度下发、安全自检、申请页公开列表、申请提交中均被跳过。删除服务器时自动先取消白名单（已禁用的跳过远端直接删除），取消失败则拒绝删除（502）
@@ -63,7 +66,8 @@
 ```json
 {
   "whitelist": [{"ip": "", "description": "", "added_by": "", "added_at": "", "expire_at": null, "locked": false}],
-  "servers": [{"host": "", "port": 22, "user": "root", "key_file": "", "name": "", "password": "", "proxy": "", "enabled": true, "whitelist": []}],
+  "public_key_whitelist": [{"id": "", "public_key": "", "fingerprint": "", "linux_user": "", "description": "", "added_by": "", "added_at": "", "expire_at": null, "locked": false}],
+  "servers": [{"host": "", "port": 22, "user": "root", "key_file": "", "name": "", "password": "", "proxy": "", "enabled": true, "whitelist": [], "public_key_whitelist": []}],
   "settings": {"ssh_port": 22, "persist_rules": true, "proxy": "", "auto_deploy": {"enabled": false, "interval_minutes": 5}, "secret_key": "", "auth": {"username": "admin", "password_hash": "sha256:..."}},
   "applications": [{"id": "", "ip": "", "name": "", "employee_id": "", "purpose": "", "duration": "", "status": "pending", "approved_servers": [], "deployed": false, ...}]
 }
@@ -86,7 +90,7 @@ uv run pytest                # 运行测试
 - 顶层用 `mock.patch.dict(sys.modules, {"paramiko": ..., "socks": ...})` 屏蔽可选依赖
 - `tmp_config_file` fixture 把 `CONFIG_FILE` 重定向到 `tmp_path`，每个测试独立隔离
 - `_CSRFClient` 自动处理 CSRF token，模拟前端 fetch 包装器行为
-- 覆盖范围：配置读写 / IP 校验 / 时效解析 / 脚本生成 / SSH 执行（mock）/ 代理解析 / CLI 子命令 / Web REST API / 认证 / 调度器 / 审核审批
+- 覆盖范围：配置读写 / IP 与公钥校验 / 时效解析 / 双层合并 / 纯 IP、混合、公钥-only、全空拒绝脚本 / sshd 校验与回滚 / SSH 执行（mock）/ CLI 子命令 / Web REST API / 认证 / 调度器 / 审核审批
 
 运行：`uv run pytest -v` 或 `uv run pytest tests/test_whitelist.py::TestParseExpire -v`。
 

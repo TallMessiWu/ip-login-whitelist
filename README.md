@@ -47,6 +47,7 @@ python web_app.py --host 127.0.0.1    # 仅本地访问（输出只剩一行 URL
 
 - **Web 登录认证**：密码哈希 PBKDF2-HMAC-SHA256（200k 迭代，兼容旧 SHA-256），session 鉴权，登录速率限制，CSRF 防护，支持在线修改密码
 - **IP 白名单**：在线添加 / 删除 / 编辑白名单 IP，支持有效期设置和**条目锁定**（锁定后无法被删除/编辑/Guest 替换，防误改关键 IP），实时生效到 `config.json`
+- **SSH 公钥白名单**：按 Linux 用户维护全局或服务器专属公钥，支持有效期、编辑、锁定和删除；未命中 IP 白名单的来源只能使用匹配用户的有效托管公钥登录
 - **服务器列表**：查看 / 添加 / 删除托管服务器，支持在线配置密钥、密码、代理
 - **服务器专属白名单**：每台服务器可额外维护专属 IP 白名单，与全局白名单自动合并去重
 - **下发白名单**：支持选择目标服务器、切换审计模式、Dry Run 预览，执行输出实时展示；多台批量下发时顶部以「失败汇总条」红色列出失败的服务器，点击即可跳转到对应日志段，无需在长日志里翻找
@@ -173,6 +174,23 @@ python whitelist_manager.py deploy --server 10.0.1.1
 | 绝对时间 | `2025-12-31 23:59:59` | 精确到秒 |
 | 不填 / `never` / `永久` | — | 永久有效 |
 
+### SSH 公钥白名单管理
+
+```bash
+# 添加永久锁定的全局恢复公钥；也可用 --key 直接粘贴普通 OpenSSH 公钥
+python whitelist_manager.py pubkey add --user root --file ~/.ssh/id_ed25519.pub --desc "管理员笔记本" --lock
+
+# 添加服务器专属临时公钥
+python whitelist_manager.py pubkey add --user deploy --key "ssh-ed25519 AAAA..." --server 10.0.1.1 --expire 7d
+
+python whitelist_manager.py pubkey list [--server <IP或别名>]
+python whitelist_manager.py pubkey lock <ID>
+python whitelist_manager.py pubkey unlock <ID>
+python whitelist_manager.py pubkey remove <ID> [--server <IP或别名>]
+```
+
+只接受不带选项的普通 OpenSSH 公钥；注释会被丢弃，私钥、证书、`command=` 等 authorized_keys 选项和内部类型不一致的密钥都会被拒绝。
+
 ### 服务器管理
 
 | 命令 | 说明 |
@@ -254,6 +272,13 @@ pip install PySocks
 2. **服务器专属白名单**：仅对指定服务器生效，通过 `ip add --server <host>` 管理
 
 下发时自动合并两层白名单（去重、过滤已过期条目）。添加全局 IP 时自动清除各服务器专属白名单中的重复项。
+
+### IP + SSH 公钥择一放行
+
+- 来源 IP 命中有效 IP 白名单时，不进入工具的 sshd `Match` 块，继续使用服务器原有密码、公钥等认证配置。
+- 未命中 IP 白名单时，只允许 `/etc/ssh/ip-login-whitelist/authorized_keys/%u` 中与登录用户匹配的有效托管公钥；用户原有 `~/.ssh/authorized_keys` 不会被读取、修改或覆盖。
+- 存在有效公钥时 SSH 端口对网络开放，由 sshd 执行认证隔离；仅有 IP 时继续使用纯防火墙白名单；IP 和公钥都为空时拒绝所有 SSH。
+- 首次启用混合模式必须具有永久锁定的恢复通道。下发会检查用户与 OpenSSH 能力，用 `sshd -t`、`sshd -T -C` 验证两类来源，reload 失败时自动回滚。
 
 ### 白名单有效期与自动过期
 
@@ -347,4 +372,4 @@ uv run pytest -v                                       # 详细模式
 uv run pytest tests/test_whitelist.py::TestParseExpire # 只跑某个测试类
 ```
 
-覆盖范围：配置读写、IP 校验、CIDR 包含、时效解析、过期清理、白名单合并、脚本生成（apply / status / remove / audit-log）、SSH 执行（mock paramiko + subprocess）、代理解析、CLI 子命令、Web REST API、登录 / CSRF / 速率限制、调度器、申请审批流程。
+覆盖范围：配置读写、IP/CIDR 与 OpenSSH 公钥校验、指纹和稳定 ID、时效解析、全局/专属合并、纯 IP/混合/公钥-only/全空拒绝脚本、sshd 校验与回滚、SSH 执行（mock paramiko + subprocess）、CLI 子命令、Web REST API、登录 / CSRF / 速率限制、调度器、申请审批流程。
