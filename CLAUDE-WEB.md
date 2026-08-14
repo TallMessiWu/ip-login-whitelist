@@ -8,14 +8,14 @@
 |---|---|---|
 | 密码哈希 / 验证 | `_hash_password()` / `_verify_password()` | L77 / L84 |
 | 旧账号迁移 | `_normalize_auth_accounts()` | L106 |
-| 登录与范围校验中间件 | `_require_login()` | L254 |
-| 登录 API | `POST /api/login` → `api_login()` | L328 |
-| 修改当前密码 | `PATCH /api/auth/password` → `api_change_password()` | L1065 |
-| 管理员列表 / 创建 | `GET/POST /api/admins` → `api_admins()` | L974 |
-| 调整范围、启停 / 删除 | `PATCH/DELETE /api/admins/<username>` | L1012 |
-| 重置临时密码 | `PATCH /api/admins/<username>/password` | L1045 |
+| 登录与范围校验中间件 | `_require_login()` | L258 |
+| 登录 API | `POST /api/login` → `api_login()` | L327 |
+| 修改当前密码 | `PATCH /api/auth/password` → `api_change_password()` | L1059 |
+| 管理员列表 / 创建 | `GET/POST /api/admins` → `api_admins()` | L968 |
+| 调整范围、启停 / 删除 | `PATCH/DELETE /api/admins/<username>` | L1006 |
+| 重置密码 | `PATCH /api/admins/<username>/password` | L1039 |
 
-`settings.auth` 旧单账号结构在首次加载时迁移为 `settings.auth.accounts`，保留用户名和密码哈希并成为唯一 `superadmin`。新建账号固定为 `scoped_admin`，字段包括 `username / password_hash / role / enabled / server_hosts / password_changed / session_version / created_at / created_by`。创建账号必须至少选择一台现存服务器、临时密码至少 6 位；首次登录只能先修改密码。修改服务器范围不重建会话但下次请求立即按新范围鉴权；改密、重置密码、禁用或删除通过 `session_version` 或账号不存在使旧会话立即失效。
+`settings.auth` 旧单账号结构在首次加载时迁移为 `settings.auth.accounts`，保留用户名和密码哈希并成为唯一 `superadmin`。新建账号固定为 `scoped_admin`，字段包括 `username / password_hash / role / enabled / server_hosts / password_changed / session_version / created_at / created_by`。创建账号必须至少选择一台现存服务器、密码至少 6 位；创建或重置时设置的密码直接生效，不再强制首次改密。兼容旧配置时 `password_changed=false` 会归一为 true，旧 session 中的 `must_change_password` 标记会在下一次请求清除。修改服务器范围不重建会话但下次请求立即按新范围鉴权；主动改密、重置密码、禁用或删除通过 `session_version` 或账号不存在使旧会话立即失效。
 
 `superadmin_required` 保护全局 IP/公钥、服务器连接信息、设置、调度器、管理员账号、审计模式下发和撤销限制。服务器专属 API 统一通过 `_server_for_account()` / `_servers_for_account()` 重新解析 host 或别名并检查范围；空筛选只返回当前账号获授权的服务器。受限管理员不能修改或解锁 locked 条目。
 

@@ -1174,9 +1174,12 @@ class TestWebLogin:
 class TestMultiAdminAccounts:
     def test_legacy_auth_migrates_without_changing_password(self, web_client, sample_config,
                                                             tmp_config_file):
+        sample_config["settings"]["auth"]["password_changed"] = False
+        tmp_config_file.write_text(json.dumps(sample_config), encoding="utf-8")
         old_hash = sample_config["settings"]["auth"]["password_hash"]
         response = _login(web_client, "admin", "admin")
         assert response.status_code == 200
+        assert response.get_json()["must_change_password"] is False
 
         cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
         auth = cfg["settings"]["auth"]
@@ -1186,10 +1189,11 @@ class TestMultiAdminAccounts:
         assert account["role"] == "superadmin"
         assert account["password_hash"] == old_hash
         assert account["server_hosts"] == []
+        assert account["password_changed"] is True
         assert account["session_version"] == 1
 
-    def test_create_first_password_change_and_safe_listing(self, logged_in_client,
-                                                           tmp_config_file):
+    def test_created_password_is_immediately_final_and_safe_listing(self, logged_in_client,
+                                                                    tmp_config_file):
         assert logged_in_client.post("/api/admins", json={
             "username": "ops-new", "password": "short", "server_hosts": ["10.0.0.1"],
         }).status_code == 400
@@ -1208,21 +1212,32 @@ class TestMultiAdminAccounts:
         scoped = _new_web_client()
         login = _login(scoped, "ops-new", "temporary")
         assert login.status_code == 200
-        assert login.get_json()["must_change_password"] is True
-        blocked = scoped.post("/api/servers/10.0.0.1/whitelist", json={"ip": "10.1.1.1"})
-        assert blocked.status_code == 403
-
-        changed = scoped.patch("/api/auth/password", json={
-            "old_password": "temporary", "new_password": "permanent-pass",
-        })
-        assert changed.status_code == 200
+        assert login.get_json()["must_change_password"] is False
         assert scoped.post("/api/servers/10.0.0.1/whitelist",
                            json={"ip": "10.1.1.1"}).status_code == 200
         cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
         account = next(a for a in cfg["settings"]["auth"]["accounts"]
                        if a["username"] == "ops-new")
         assert account["password_changed"] is True
-        assert account["session_version"] == 2
+        assert account["session_version"] == 1
+
+    def test_stale_first_login_flag_no_longer_blocks_existing_session(
+            self, web_client, multi_admin_config, tmp_config_file):
+        assert _login(web_client, "ops1", "ops-pass-1").status_code == 200
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        account = next(a for a in cfg["settings"]["auth"]["accounts"]
+                       if a["username"] == "ops1")
+        account["password_changed"] = False
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        with web_client.session_transaction() as session:
+            session["must_change_password"] = True
+
+        response = web_client.post(
+            "/api/servers/10.0.0.1/whitelist", json={"ip": "10.1.1.2"}
+        )
+        assert response.status_code == 200
+        with web_client.session_transaction() as session:
+            assert "must_change_password" not in session
 
     def test_reset_disable_delete_invalidate_sessions(self, web_client, multi_admin_config):
         assert _login(web_client, "admin", "admin").status_code == 200
@@ -1233,20 +1248,17 @@ class TestMultiAdminAccounts:
                                  json={"new_password": "reset-temp"})
         assert reset.status_code == 200
         assert ops.get("/api/config").status_code == 401
-        assert _login(ops, "ops1", "reset-temp").get_json()["must_change_password"] is True
-        assert ops.patch("/api/auth/password", json={
-            "old_password": "reset-temp", "new_password": "after-reset",
-        }).status_code == 200
+        assert _login(ops, "ops1", "reset-temp").get_json()["must_change_password"] is False
 
         assert web_client.patch("/api/admins/ops1", json={"enabled": False}).status_code == 200
         assert ops.get("/api/config").status_code == 401
-        assert _login(ops, "ops1", "after-reset").status_code == 401
+        assert _login(ops, "ops1", "reset-temp").status_code == 401
         assert web_client.patch("/api/admins/ops1", json={"enabled": True}).status_code == 200
-        assert _login(ops, "ops1", "after-reset").status_code == 200
+        assert _login(ops, "ops1", "reset-temp").status_code == 200
 
         assert web_client.delete("/api/admins/ops1").status_code == 200
         assert ops.get("/api/config").status_code == 401
-        assert _login(ops, "ops1", "after-reset").status_code == 401
+        assert _login(ops, "ops1", "reset-temp").status_code == 401
 
     def test_scope_change_is_immediate_without_relogin(self, web_client, multi_admin_config):
         assert _login(web_client, "admin", "admin").status_code == 200

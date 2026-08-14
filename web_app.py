@@ -119,7 +119,7 @@ def _normalize_auth_accounts(cfg: dict) -> tuple[list[dict], bool]:
             "role": "superadmin",
             "enabled": True,
             "server_hosts": [],
-            "password_changed": bool(auth.get("password_changed", False)),
+            "password_changed": True,
             "session_version": 1,
             "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "created_by": "system",
@@ -133,13 +133,17 @@ def _normalize_auth_accounts(cfg: dict) -> tuple[list[dict], bool]:
             "role": "scoped_admin",
             "enabled": True,
             "server_hosts": [],
-            "password_changed": False,
+            "password_changed": True,
             "session_version": 1,
         }
         for key, value in defaults.items():
             if key not in account:
                 account[key] = value
                 changed = True
+        # 旧版本用该字段强制首次登录改密；现在创建/重置时设置的密码直接生效。
+        if account.get("password_changed") is not True:
+            account["password_changed"] = True
+            changed = True
     return accounts, changed
 
 
@@ -274,12 +278,7 @@ def _require_login():
             return jsonify({"success": False, "message": "登录状态已失效"}), 401
         return redirect(url_for("login_page"))
     g.current_account = account
-    if not account.get("password_changed", False):
-        session["must_change_password"] = True
-
-    if (session.get("must_change_password") and request.method in ("POST", "PUT", "PATCH", "DELETE")
-            and request.path not in ("/api/auth/password", "/api/logout")):
-        return jsonify({"success": False, "message": "请先修改临时密码"}), 403
+    session.pop("must_change_password", None)
 
     # CSRF 校验：所有状态变更请求必须携带有效 token
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -346,13 +345,8 @@ def api_login():
     session["username"] = account["username"]
     session["session_version"] = int(account.get("session_version", 1))
 
-    # 检查是否需要强制修改默认密码
-    need_change = not account.get("password_changed", False)
-    if need_change:
-        session["must_change_password"] = True
-
     _ensure_csrf_token()
-    return jsonify({"success": True, "message": "登录成功", "must_change_password": need_change})
+    return jsonify({"success": True, "message": "登录成功", "must_change_password": False})
 
 
 @public_route("/api/csrf-token")
@@ -983,7 +977,7 @@ def api_admins():
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", username):
         return jsonify({"success": False, "message": "用户名仅支持字母、数字、点、下划线和短横线"}), 400
     if len(password) < 6:
-        return jsonify({"success": False, "message": "临时密码至少 6 位"}), 400
+        return jsonify({"success": False, "message": "密码至少 6 位"}), 400
     if any(a.get("username", "").casefold() == username.casefold() for a in accounts):
         return jsonify({"success": False, "message": "用户名已存在"}), 409
     hosts, error = _validate_account_hosts(cfg, data.get("server_hosts"))
@@ -995,7 +989,7 @@ def api_admins():
         "role": "scoped_admin",
         "enabled": True,
         "server_hosts": hosts,
-        "password_changed": False,
+        "password_changed": True,
         "session_version": 1,
         "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "created_by": g.current_account["username"],
@@ -1046,7 +1040,7 @@ def api_admin_reset_password(username):
     data = request.json or {}
     new_pw = data.get("new_password") or ""
     if len(new_pw) < 6:
-        return jsonify({"success": False, "message": "临时密码至少 6 位"}), 400
+        return jsonify({"success": False, "message": "密码至少 6 位"}), 400
     cfg = load_config(purge=False)
     account = _find_account(cfg, username)
     if not account:
@@ -1054,7 +1048,7 @@ def api_admin_reset_password(username):
     if account.get("role") == "superadmin":
         return jsonify({"success": False, "message": "超级管理员请使用修改密码功能"}), 403
     account["password_hash"] = _hash_password(new_pw)
-    account["password_changed"] = False
+    account["password_changed"] = True
     account["session_version"] = int(account.get("session_version", 1)) + 1
     save_config(cfg)
     return jsonify({"success": True, "message": f"已重置 {account['username']} 的密码"})
@@ -1519,7 +1513,7 @@ def api_config():
             "username": account["username"],
             "role": account.get("role", "scoped_admin"),
             "server_hosts": sorted(_allowed_server_hosts(cfg, account)),
-            "must_change_password": not account.get("password_changed", False),
+            "must_change_password": False,
         },
         "capabilities": capabilities,
         "servers": [],
