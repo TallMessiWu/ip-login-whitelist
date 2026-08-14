@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 # 所有 config.json 读写必须持有此锁，防止并发写覆盖和 TOCTOU 竞态
-CONFIG_LOCK = threading.Lock()
+CONFIG_LOCK = threading.RLock()
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
 

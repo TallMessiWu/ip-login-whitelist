@@ -34,6 +34,7 @@
         </div>
       </div>
       <div class="flex items-center gap-2">
+        <span id="current-user" class="hidden text-xs text-slate-400 px-2"></span>
         <!-- 语言切换 -->
         <div class="relative" id="lang-dropdown">
           <button onclick="toggleLangMenu()" title="Language"
@@ -58,8 +59,11 @@
           class="w-8 h-8 flex items-center justify-center rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors">
           <i class="fas fa-rotate-right text-sm" id="refresh-icon"></i>
         </button>
-        <button onclick="openSettings()"
-          class="flex items-center gap-1.5 text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors text-sm">
+        <button onclick="openAdmins()" id="admins-btn" class="hidden flex items-center gap-1.5 text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors text-sm">
+          <i class="fas fa-users-gear"></i><span data-i18n="admins_title">管理员账号</span>
+        </button>
+        <button onclick="openSettings()" id="settings-btn"
+          class="hidden flex items-center gap-1.5 text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors text-sm">
           <i class="fas fa-sliders"></i>
           <span data-i18n="settings">设置</span>
         </button>
@@ -97,10 +101,10 @@
     <div id="tab-manage" class="space-y-6">
 
     <!-- 上方两栏 -->
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div id="top-management-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
       <!-- ── IP 白名单 ─────────────────────────────────────────── -->
-      <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col">
+      <div id="global-ip-panel" class="hidden bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col">
         <div class="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
           <div class="flex items-center gap-2">
             <i class="fas fa-shield-check text-green-500"></i>
@@ -167,8 +171,8 @@
               class="flex items-center gap-1 text-slate-500 hover:text-slate-700 border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
               <i class="fas fa-heartbeat"></i> <span data-i18n="srv_check_status">检查状态</span>
             </button>
-            <button onclick="openAddServerModal()"
-              class="flex items-center gap-1 bg-violet-600 hover:bg-violet-700 text-white px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
+            <button onclick="openAddServerModal()" id="add-server-btn"
+              class="hidden flex items-center gap-1 bg-violet-600 hover:bg-violet-700 text-white px-3 py-1.5 rounded-md text-xs font-medium transition-colors">
               <i class="fas fa-plus text-xs"></i> <span data-i18n="srv_add_button">添加服务器</span>
             </button>
           </div>
@@ -183,7 +187,7 @@
     </div>
 
     <!-- ── SSH 公钥白名单 ─────────────────────────────────────── -->
-    <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col">
+    <div id="global-pk-panel" class="hidden bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col">
       <div class="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
         <div class="flex items-center gap-2">
           <i class="fas fa-key text-amber-500"></i>
@@ -240,7 +244,7 @@
           </div>
 
           <!-- 审计模式 toggle -->
-          <label class="flex items-center gap-2 cursor-pointer select-none">
+          <label id="audit-mode-control" class="hidden flex items-center gap-2 cursor-pointer select-none">
             <div class="relative">
               <input type="checkbox" id="audit-mode" class="sr-only peer">
               <div class="w-9 h-5 bg-slate-200 peer-checked:bg-amber-400 rounded-full transition-colors duration-200"></div>
@@ -268,7 +272,7 @@
               <i class="fas fa-scroll"></i> <span data-i18n="deploy_audit_log_btn">审计日志</span>
             </button>
             <button onclick="removeWhitelist()" id="remove-btn"
-              class="flex items-center gap-1.5 border border-red-200 hover:border-red-300 text-red-600 hover:text-red-800 hover:bg-red-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              class="hidden flex items-center gap-1.5 border border-red-200 hover:border-red-300 text-red-600 hover:text-red-800 hover:bg-red-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
               <i class="fas fa-shield-xmark"></i> <span data-i18n="deploy_remove_btn">取消白名单</span>
             </button>
             <button onclick="deployWhitelist()" id="deploy-btn"
@@ -548,6 +552,31 @@
     </div>
   </div>
 
+  <!-- ── 管理员账号模态框 ────────────────────────────────────────── -->
+  <div id="admins-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4">
+    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeAdmins()"></div>
+    <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl p-6 fade-in max-h-[90vh] overflow-auto">
+      <div class="flex items-center justify-between mb-5">
+        <h3 class="text-base font-semibold text-slate-800" data-i18n="admins_title">管理员账号</h3>
+        <button onclick="closeAdmins()" class="text-slate-400 hover:text-slate-600 w-7 h-7 rounded-md hover:bg-slate-100"><i class="fas fa-xmark"></i></button>
+      </div>
+      <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <input id="admin-username" type="text" data-i18n-placeholder="admins_username"
+            class="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white">
+          <input id="admin-password" type="password" data-i18n-placeholder="admins_temp_password"
+            class="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white">
+        </div>
+        <div class="text-xs font-medium text-slate-600 mt-3 mb-1.5" data-i18n="admins_servers">可管理服务器</div>
+        <div id="admin-create-servers" class="grid grid-cols-1 sm:grid-cols-2 gap-2"></div>
+        <div class="flex justify-end mt-3">
+          <button onclick="createAdmin()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm" data-i18n="admins_create">创建管理员</button>
+        </div>
+      </div>
+      <div id="admins-list" class="space-y-3"></div>
+    </div>
+  </div>
+
   <!-- ── 设置模态框 ──────────────────────────────────────────────── -->
   <div id="settings-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4">
     <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeSettings()"></div>
@@ -716,6 +745,36 @@
     async function loadConfig() {
       const res = await fetch('/api/config');
       CFG = await res.json();
+      applyCapabilities();
+    }
+
+    function isSuperadmin() {
+      return !!(CFG.capabilities && CFG.capabilities.is_superadmin);
+    }
+
+    function applyCapabilities() {
+      const isSuper = isSuperadmin();
+      ['global-ip-panel', 'global-pk-panel', 'settings-btn', 'add-server-btn',
+       'audit-mode-control', 'remove-btn'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('hidden', !isSuper);
+      });
+      const adminsBtn = document.getElementById('admins-btn');
+      if (adminsBtn) adminsBtn.classList.toggle('hidden', !isSuper);
+      const grid = document.getElementById('top-management-grid');
+      if (grid) grid.classList.toggle('lg:grid-cols-2', isSuper);
+      const user = document.getElementById('current-user');
+      if (user && CFG.current_user) {
+        user.textContent = CFG.current_user.username;
+        user.classList.remove('hidden');
+      }
+      if (!isSuper) {
+        const audit = document.getElementById('audit-mode');
+        if (audit) audit.checked = false;
+      }
+      if (CFG.current_user && CFG.current_user.must_change_password) {
+        setTimeout(openChangePwdModal, 0);
+      }
     }
 
     async function refreshAll() {
@@ -747,8 +806,9 @@
     function updateHeaderSummary() {
       const wl = (CFG.whitelist || []).length;
       const sv = (CFG.servers || []).length;
-      document.getElementById('header-summary').textContent =
-        t('header_summary', {wl_count: wl, srv_count: sv});
+      document.getElementById('header-summary').textContent = isSuperadmin()
+        ? t('header_summary', {wl_count: wl, srv_count: sv})
+        : t('header_scoped_summary', {srv_count: sv});
     }
 
     // ─── 渲染白名单 ────────────────────────────────────────────────
@@ -822,11 +882,14 @@
     function publicKeyRow(e, scope) {
       const locked = !!e.locked;
       const scopeArg = escAttr(scope || '');
+      const lockControl = CFG.capabilities && CFG.capabilities.manage_locked
+        ? `<button onclick="toggleLockPublicKey('${escAttr(e.id)}','${scopeArg}',${locked ? 'false' : 'true'})"
+          class="${locked ? 'text-amber-500' : 'text-slate-400'} w-7 h-7" title="${locked ? t('wl_unlock_title') : t('wl_lock_title')}"><i class="fas ${locked ? 'fa-lock-open' : 'fa-lock'} text-xs"></i></button>`
+        : '';
       const controls = `
         <button onclick="editPublicKey('${escAttr(e.id)}','${scopeArg}')" ${locked ? 'disabled' : ''}
           class="${locked ? 'text-slate-200' : 'text-blue-400 hover:text-blue-600'} w-7 h-7" title="${t('edit')}"><i class="fas fa-pen text-xs"></i></button>
-        <button onclick="toggleLockPublicKey('${escAttr(e.id)}','${scopeArg}',${locked ? 'false' : 'true'})"
-          class="${locked ? 'text-amber-500' : 'text-slate-400'} w-7 h-7" title="${locked ? t('wl_unlock_title') : t('wl_lock_title')}"><i class="fas ${locked ? 'fa-lock-open' : 'fa-lock'} text-xs"></i></button>
+        ${lockControl}
         <button onclick="removePublicKey('${escAttr(e.id)}','${scopeArg}')" ${locked ? 'disabled' : ''}
           class="${locked ? 'text-slate-200' : 'text-red-400 hover:text-red-600'} w-7 h-7" title="${t('delete')}"><i class="fas fa-trash-can text-xs"></i></button>`;
       return `<div class="px-5 py-2.5 flex items-center justify-between gap-3 group">
@@ -868,7 +931,7 @@
       }
 
       el.innerHTML = servers.map(s => {
-        const authTag = s.key_file
+        const authTag = !isSuperadmin() ? '' : s.key_file
           ? `<span class="text-xs text-yellow-600 bg-yellow-50 border border-yellow-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-key mr-0.5"></i>${t('srv_auth_key')}</span>`
           : s.has_password
           ? `<span class="text-xs text-orange-600 bg-orange-50 border border-orange-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-lock mr-0.5"></i>${t('srv_auth_password')}</span>`
@@ -900,7 +963,7 @@
                 title="${t('delete')}">
                 <i class="fas fa-xmark" style="font-size:10px"></i>
               </button>`;
-          const lockBtn = isLocked
+          const lockBtn = !(CFG.capabilities && CFG.capabilities.manage_locked) ? '' : isLocked
             ? `<button onclick="toggleLockIP('${escAttr(e.ip)}','${escAttr(s.host)}', false)"
                 class="text-amber-500 hover:text-amber-700 w-5 h-5 flex items-center justify-center rounded transition-colors"
                 title="${t('wl_unlock_title')}">
@@ -930,7 +993,7 @@
         const isEnabled = s.enabled !== false;
         const disabledBadge = isEnabled ? '' :
           `<span class="text-xs text-slate-500 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-full"><i class="fas fa-ban mr-0.5"></i>${t('srv_disabled_badge')}</span>`;
-        const toggleBtn = `
+        const toggleBtn = !isSuperadmin() ? '' : `
                   <button onclick="toggleServerEnabled('${escAttr(s.host)}', ${isEnabled ? 'false' : 'true'})" id="toggle-${escAttr(s.host)}"
                     title="${isEnabled ? t('srv_disable_title') : t('srv_enable_title')}"
                     class="${isEnabled ? 'text-green-500 hover:text-amber-600 hover:bg-amber-50' : 'text-slate-400 hover:text-green-600 hover:bg-green-50'} w-7 h-7 flex items-center justify-center rounded-md transition-all">
@@ -955,17 +1018,17 @@
                     class="text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
                     <i class="fas fa-list-check text-xs"></i>
                   </button>
-                  <button onclick="openEditPwdModal('${escAttr(s.host)}')" title="${t('edit_auth_title')}"
+                  ${isSuperadmin() ? `<button onclick="openEditPwdModal('${escAttr(s.host)}')" title="${t('edit_auth_title')}"
                     class="text-blue-400 hover:text-blue-600 hover:bg-blue-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
                     <i class="fas fa-key text-xs"></i>
                   </button>
                   <button onclick="removeServer('${escAttr(s.host)}')" title="${t('delete')}" id="del-${escAttr(s.host)}"
                     class="text-red-400 hover:text-red-600 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all">
                     <i class="fas fa-trash-can text-xs"></i>
-                  </button>
+                  </button>` : ''}
                 </div>
               </div>
-              <div class="ml-5 text-xs text-slate-400 mt-0.5">${escHtml(s.user)}@${escHtml(s.host)}:${s.port || 22}${s.proxy ? ' · proxy: '+escHtml(s.proxy) : ''}</div>
+              <div class="ml-5 text-xs text-slate-400 mt-0.5">${isSuperadmin() ? escHtml(s.user) + '@' : ''}${escHtml(s.host)}${isSuperadmin() ? ':' + (s.port || 22) : ''}${isSuperadmin() && s.proxy ? ' · proxy: '+escHtml(s.proxy) : ''}</div>
             </div>
 
             <!-- 专属白名单面板 -->
@@ -1816,6 +1879,102 @@
       setTimeout(() => el.classList.remove('log-flash'), 1600);
     }
 
+    // ─── 管理员账号 ────────────────────────────────────────────────
+
+    function adminServerChoices(selected, className) {
+      const chosen = new Set(selected || []);
+      return (CFG.servers || []).map(s => `
+        <label class="flex items-center gap-2 text-xs text-slate-600 bg-white border border-slate-200 rounded-lg px-3 py-2">
+          <input type="checkbox" value="${escAttr(s.host)}" class="${className} rounded border-slate-300 text-blue-600" ${chosen.has(s.host) ? 'checked' : ''}>
+          <span>${escHtml(s.name || s.host)} <span class="text-slate-400">${escHtml(s.host)}</span></span>
+        </label>`).join('');
+    }
+
+    async function openAdmins() {
+      if (!isSuperadmin()) return;
+      document.getElementById('admin-username').value = '';
+      document.getElementById('admin-password').value = '';
+      document.getElementById('admin-create-servers').innerHTML = adminServerChoices([], 'admin-create-scope');
+      document.getElementById('admins-modal').classList.remove('hidden');
+      await loadAdmins();
+      i18nPage();
+    }
+
+    function closeAdmins() {
+      document.getElementById('admins-modal').classList.add('hidden');
+    }
+
+    async function loadAdmins() {
+      const res = await fetch('/api/admins');
+      const data = await res.json();
+      if (!data.success) { toast(data.message || t('operation_failed'), 'error'); return; }
+      const el = document.getElementById('admins-list');
+      el.innerHTML = (data.admins || []).map(a => {
+        const superAdmin = a.role === 'superadmin';
+        const rowId = `admin-row-${a.username}`;
+        const status = a.enabled
+          ? `<span class="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded-full">${t('admins_enabled')}</span>`
+          : `<span class="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">${t('admins_disabled')}</span>`;
+        return `<div id="${escAttr(rowId)}" class="border border-slate-200 rounded-xl p-4">
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <div class="flex items-center gap-2"><span class="font-semibold text-slate-800">${escHtml(a.username)}</span>${status}
+              ${superAdmin ? `<span class="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">${t('admins_superadmin')}</span>` : ''}</div>
+            ${superAdmin ? '' : `<div class="flex gap-2">
+              <button onclick="resetAdminPassword('${escAttr(a.username)}')" class="text-xs text-amber-600 hover:text-amber-800">${t('admins_reset_password')}</button>
+              <button onclick="deleteAdmin('${escAttr(a.username)}')" class="text-xs text-red-500 hover:text-red-700">${t('delete')}</button>
+            </div>`}
+          </div>
+          ${superAdmin ? '' : `<div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">${adminServerChoices(a.server_hosts, 'admin-scope')}</div>
+          <div class="flex items-center justify-between">
+            <label class="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" class="admin-enabled" ${a.enabled ? 'checked' : ''}>${t('admins_enabled')}</label>
+            <button onclick="saveAdmin('${escAttr(a.username)}')" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-xs">${t('save')}</button>
+          </div>`}
+        </div>`;
+      }).join('');
+    }
+
+    async function createAdmin() {
+      const username = document.getElementById('admin-username').value.trim();
+      const password = document.getElementById('admin-password').value;
+      const server_hosts = Array.from(document.querySelectorAll('.admin-create-scope:checked')).map(e => e.value);
+      const res = await fetch('/api/admins', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username, password, server_hosts})});
+      const data = await res.json();
+      if (!data.success) { toast(data.message || t('operation_failed'), 'error'); return; }
+      toast(data.message, 'success');
+      document.getElementById('admin-username').value = '';
+      document.getElementById('admin-password').value = '';
+      await loadAdmins();
+    }
+
+    async function saveAdmin(username) {
+      const row = document.getElementById('admin-row-' + username);
+      const server_hosts = Array.from(row.querySelectorAll('.admin-scope:checked')).map(e => e.value);
+      const enabled = row.querySelector('.admin-enabled').checked;
+      const res = await fetch('/api/admins/' + encodeURIComponent(username), {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({server_hosts, enabled})});
+      const data = await res.json();
+      toast(data.message || t('operation_failed'), data.success ? 'success' : 'error');
+      if (data.success) await loadAdmins();
+    }
+
+    async function resetAdminPassword(username) {
+      const new_password = prompt(t('admins_password_prompt'));
+      if (new_password === null) return;
+      const res = await fetch('/api/admins/' + encodeURIComponent(username) + '/password', {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({new_password})});
+      const data = await res.json();
+      toast(data.message || t('operation_failed'), data.success ? 'success' : 'error');
+    }
+
+    async function deleteAdmin(username) {
+      if (!confirm(t('admins_delete_confirm', {username}))) return;
+      const res = await fetch('/api/admins/' + encodeURIComponent(username), {method: 'DELETE'});
+      const data = await res.json();
+      toast(data.message || t('operation_failed'), data.success ? 'success' : 'error');
+      if (data.success) await loadAdmins();
+    }
+
     // ─── 设置模态框 ────────────────────────────────────────────────
 
     async function openSettings() {
@@ -2165,11 +2324,18 @@
           const srvCheckboxes = (a.servers || []).map(h => {
             const s = serverNames.find(s => s.host === h);
             const label = s ? `${s.name || s.host} (${s.host})` : h;
-            // 已禁用的服务器不可批准（不会被下发），勾选框置灰禁用并标注
+            const review = (a.server_reviews || {})[h] || {status: 'pending'};
             const isDisabled = s && s.enabled === false;
             const suffix = isDisabled ? ` · ${t('srv_disabled_badge')}` : '';
-            return `<label class="flex items-center gap-2 py-1 ${isDisabled ? 'opacity-50' : ''}">
-              <input type="checkbox" value="${escAttr(h)}" class="app-srv-cb app-${escAttr(a.id)}-cb w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500" ${isDisabled ? 'disabled' : 'checked'}>
+            if (review.status !== 'pending') {
+              const approved = review.status === 'approved';
+              return `<div class="flex items-center gap-2 py-1">
+                <span class="w-3.5 text-center text-xs ${approved ? 'text-green-600' : 'text-red-500'}"><i class="fas ${approved ? 'fa-check' : 'fa-xmark'}"></i></span>
+                <span class="text-xs text-slate-500">${escHtml(label)} · ${approved ? t('review_status_approved') : t('review_status_rejected')}${review.reviewed_by ? ' · ' + escHtml(review.reviewed_by) : ''}</span>
+              </div>`;
+            }
+            return `<label class="flex items-center gap-2 py-1 ${isDisabled ? 'opacity-70' : ''}">
+              <input type="checkbox" value="${escAttr(h)}" data-disabled="${isDisabled ? '1' : '0'}" class="app-srv-cb app-${escAttr(a.id)}-cb w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500" ${isDisabled ? '' : 'checked'}>
               <span class="text-xs text-slate-600">${escHtml(label)}${suffix}</span>
             </label>`;
           }).join('');
@@ -2362,14 +2528,18 @@
 
     async function reviewApp(appId, action) {
       let body = { action };
+      const checked = document.querySelectorAll(`.app-${appId}-cb:checked`);
+      const servers = Array.from(checked).map(cb => cb.value);
+      if (!servers.length) {
+        toast(t('review_select_server'), 'warn');
+        return;
+      }
+      body.servers = servers;
       if (action === 'approve') {
-        const checked = document.querySelectorAll(`.app-${appId}-cb:checked`);
-        const servers = Array.from(checked).map(cb => cb.value);
-        if (!servers.length) {
-          toast(t('review_select_server'), 'warn');
+        if (Array.from(checked).some(cb => cb.dataset.disabled === '1')) {
+          toast(t('review_disabled_cannot_approve'), 'warn');
           return;
         }
-        body.servers = servers;
         const expirePreset = document.getElementById('expire-' + appId);
         const expireCustom = document.getElementById('expire-custom-' + appId);
         if (expirePreset && expirePreset.value) {
@@ -2531,6 +2701,7 @@
     }
 
     function closeChangePwdModal() {
+      if (CFG.current_user && CFG.current_user.must_change_password) return;
       document.getElementById('change-pwd-modal').classList.add('hidden');
     }
 
@@ -2564,6 +2735,7 @@
         });
         const data = await res.json();
         if (data.success) {
+          if (CFG.current_user) CFG.current_user.must_change_password = false;
           closeChangePwdModal();
           toast(t('change_pwd_updated'), 'success');
         } else {

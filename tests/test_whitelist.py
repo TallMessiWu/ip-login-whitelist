@@ -76,7 +76,7 @@ def sample_config(tmp_config_file):
             "persist_rules": True,
             "proxy": "",
             "auto_deploy": {"enabled": False, "interval_minutes": 5},
-            "auth": {"username": "admin", "password_hash": pw_hash},
+            "auth": {"username": "admin", "password_hash": pw_hash, "password_changed": True},
         },
     }
     tmp_config_file.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
@@ -990,6 +990,7 @@ class _CSRFClient:
 @pytest.fixture
 def web_client(tmp_config_file, monkeypatch):
     """创建 Flask 测试客户端，mock 掉 run_on_server。"""
+    web_app._LOGIN_RATE_LIMIT.clear()
     monkeypatch.setattr(web_app, "run_on_server", mock.MagicMock(return_value=True))
     monkeypatch.setattr(web_app, "capture_run", mock.MagicMock(return_value=(True, "mock output")))
     # 默认让本地出口探测返回 None，使 /api/deploy 的"管理机本地 IP 必须在全局白名单"硬拦截
@@ -1020,7 +1021,89 @@ def logged_in_client(web_client, sample_config):
         with web_client.session_transaction() as sess:
             sess["authenticated"] = True
             sess["username"] = "admin"
+            sess["session_version"] = 1
             sess["csrf_token"] = CSRF_TEST_TOKEN
+    return web_client
+
+
+def _new_web_client():
+    """创建共享同一临时配置的第二个浏览器会话。"""
+    return _CSRFClient(web_app.app.test_client(), CSRF_TEST_TOKEN)
+
+
+@pytest.fixture
+def multi_admin_config(sample_config, tmp_config_file):
+    """两台服务器、两个受限管理员及不可泄露的全局数据。"""
+    cfg = sample_config
+    accounts, _ = web_app._normalize_auth_accounts(cfg)
+    accounts.extend([
+        {
+            "username": "ops1", "password_hash": web_app._hash_password("ops-pass-1"),
+            "role": "scoped_admin", "enabled": True, "server_hosts": ["10.0.0.1"],
+            "password_changed": True, "session_version": 1,
+            "created_at": "2026-08-14 10:00:00", "created_by": "admin",
+        },
+        {
+            "username": "ops2", "password_hash": web_app._hash_password("ops-pass-2"),
+            "role": "scoped_admin", "enabled": True, "server_hosts": ["10.0.0.2"],
+            "password_changed": True, "session_version": 1,
+            "created_at": "2026-08-14 10:00:00", "created_by": "admin",
+        },
+        {
+            "username": "ops-shared", "password_hash": web_app._hash_password("ops-shared"),
+            "role": "scoped_admin", "enabled": True, "server_hosts": ["10.0.0.1"],
+            "password_changed": True, "session_version": 1,
+            "created_at": "2026-08-14 10:00:00", "created_by": "admin",
+        },
+    ])
+    cfg["whitelist"] = [
+        {"ip": "203.0.113.0/24", "description": "global-v4-secret", "locked": True},
+        {"ip": "2001:db8::/64", "description": "global-v6-secret", "locked": True},
+    ]
+    cfg["public_key_whitelist"] = [{
+        "id": "root:GLOBAL-KEY-ID", "public_key": fake_public_key(suffix=b"global-secret-key"),
+        "fingerprint": "SHA256:GLOBAL-SECRET-FINGERPRINT", "linux_user": "root",
+        "description": "global-key-secret", "locked": True,
+    }]
+    cfg["servers"][0].update({
+        "name": "server1", "user": "root", "password": "server-one-password",
+        "key_file": "C:/secret/id_one", "proxy": "socks5://secret-one",
+        "whitelist": [
+            {"ip": "10.10.10.10", "description": "server-one-visible"},
+            {"ip": "10.10.10.11", "description": "server-one-locked", "locked": True},
+        ],
+        "public_key_whitelist": [{
+            "id": "alice:SERVER1-LOCKED", "public_key": fake_public_key(),
+            "fingerprint": "SHA256:SERVER1-LOCKED", "linux_user": "alice", "locked": True,
+        }],
+        "enabled": True,
+    })
+    cfg["servers"].append({
+        "host": "10.0.0.2", "port": 2222, "user": "ubuntu", "name": "server2",
+        "password": "server-two-password", "key_file": "C:/secret/id_two",
+        "proxy": "http://secret-two", "enabled": True,
+        "whitelist": [{"ip": "10.20.20.20", "description": "server-two-secret"}],
+        "public_key_whitelist": [{
+            "id": "bob:SERVER2", "public_key": fake_public_key(suffix=b"server-two"),
+            "fingerprint": "SHA256:SERVER2", "linux_user": "bob",
+        }],
+    })
+    cfg["settings"].update({
+        "secret_key": "flask-secret-must-not-leak",
+        "encryption_key": base64.urlsafe_b64encode(
+            b"0123456789abcdef0123456789abcdef"
+        ).decode(),
+        "proxy": "socks5://global-proxy-secret",
+    })
+    tmp_config_file.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    return cfg
+
+
+@pytest.fixture
+def scoped_client(web_client, multi_admin_config):
+    response = _login(web_client, "ops1", "ops-pass-1")
+    assert response.status_code == 200
+    assert response.get_json()["must_change_password"] is False
     return web_client
 
 
@@ -1086,6 +1169,113 @@ class TestWebLogin:
     def test_login_missing_fields(self, web_client):
         resp = web_client.post("/api/login", json={})
         assert resp.status_code == 401
+
+
+class TestMultiAdminAccounts:
+    def test_legacy_auth_migrates_without_changing_password(self, web_client, sample_config,
+                                                            tmp_config_file):
+        old_hash = sample_config["settings"]["auth"]["password_hash"]
+        response = _login(web_client, "admin", "admin")
+        assert response.status_code == 200
+
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        auth = cfg["settings"]["auth"]
+        assert set(auth) == {"accounts"}
+        account = auth["accounts"][0]
+        assert account["username"] == "admin"
+        assert account["role"] == "superadmin"
+        assert account["password_hash"] == old_hash
+        assert account["server_hosts"] == []
+        assert account["session_version"] == 1
+
+    def test_create_first_password_change_and_safe_listing(self, logged_in_client,
+                                                           tmp_config_file):
+        assert logged_in_client.post("/api/admins", json={
+            "username": "ops-new", "password": "short", "server_hosts": ["10.0.0.1"],
+        }).status_code == 400
+        assert logged_in_client.post("/api/admins", json={
+            "username": "ops-new", "password": "temporary", "server_hosts": [],
+        }).status_code == 400
+
+        created = logged_in_client.post("/api/admins", json={
+            "username": "ops-new", "password": "temporary", "server_hosts": ["10.0.0.1"],
+        })
+        assert created.status_code == 201
+        listed = logged_in_client.get("/api/admins").get_json()["admins"]
+        assert {a["username"] for a in listed} == {"admin", "ops-new"}
+        assert all("password_hash" not in a and "session_version" not in a for a in listed)
+
+        scoped = _new_web_client()
+        login = _login(scoped, "ops-new", "temporary")
+        assert login.status_code == 200
+        assert login.get_json()["must_change_password"] is True
+        blocked = scoped.post("/api/servers/10.0.0.1/whitelist", json={"ip": "10.1.1.1"})
+        assert blocked.status_code == 403
+
+        changed = scoped.patch("/api/auth/password", json={
+            "old_password": "temporary", "new_password": "permanent-pass",
+        })
+        assert changed.status_code == 200
+        assert scoped.post("/api/servers/10.0.0.1/whitelist",
+                           json={"ip": "10.1.1.1"}).status_code == 200
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        account = next(a for a in cfg["settings"]["auth"]["accounts"]
+                       if a["username"] == "ops-new")
+        assert account["password_changed"] is True
+        assert account["session_version"] == 2
+
+    def test_reset_disable_delete_invalidate_sessions(self, web_client, multi_admin_config):
+        assert _login(web_client, "admin", "admin").status_code == 200
+        ops = _new_web_client()
+        assert _login(ops, "ops1", "ops-pass-1").status_code == 200
+
+        reset = web_client.patch("/api/admins/ops1/password",
+                                 json={"new_password": "reset-temp"})
+        assert reset.status_code == 200
+        assert ops.get("/api/config").status_code == 401
+        assert _login(ops, "ops1", "reset-temp").get_json()["must_change_password"] is True
+        assert ops.patch("/api/auth/password", json={
+            "old_password": "reset-temp", "new_password": "after-reset",
+        }).status_code == 200
+
+        assert web_client.patch("/api/admins/ops1", json={"enabled": False}).status_code == 200
+        assert ops.get("/api/config").status_code == 401
+        assert _login(ops, "ops1", "after-reset").status_code == 401
+        assert web_client.patch("/api/admins/ops1", json={"enabled": True}).status_code == 200
+        assert _login(ops, "ops1", "after-reset").status_code == 200
+
+        assert web_client.delete("/api/admins/ops1").status_code == 200
+        assert ops.get("/api/config").status_code == 401
+        assert _login(ops, "ops1", "after-reset").status_code == 401
+
+    def test_scope_change_is_immediate_without_relogin(self, web_client, multi_admin_config):
+        assert _login(web_client, "admin", "admin").status_code == 200
+        ops = _new_web_client()
+        assert _login(ops, "ops1", "ops-pass-1").status_code == 200
+        assert [s["host"] for s in ops.get("/api/config").get_json()["servers"]] == ["10.0.0.1"]
+
+        emptied = web_client.patch("/api/admins/ops1", json={"server_hosts": []})
+        assert emptied.status_code == 200
+        assert ops.get("/api/config").get_json()["servers"] == []
+
+        response = web_client.patch("/api/admins/ops1", json={"server_hosts": ["10.0.0.2"]})
+        assert response.status_code == 200
+        assert [s["host"] for s in ops.get("/api/config").get_json()["servers"]] == ["10.0.0.2"]
+
+    def test_superadmin_is_immutable_and_server_delete_cleans_scopes(
+            self, web_client, multi_admin_config, tmp_config_file):
+        assert _login(web_client, "admin", "admin").status_code == 200
+        assert web_client.patch("/api/admins/admin", json={"enabled": False}).status_code == 403
+        assert web_client.patch("/api/admins/admin/password",
+                                json={"new_password": "forbidden"}).status_code == 403
+        assert web_client.delete("/api/admins/admin").status_code == 403
+
+        assert web_client.delete("/api/servers/10.0.0.1?force=1").status_code == 200
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        ops1 = next(a for a in cfg["settings"]["auth"]["accounts"]
+                    if a["username"] == "ops1")
+        assert ops1["enabled"] is True
+        assert ops1["server_hosts"] == []
 
 
 class TestWebUnauthenticated:
@@ -1268,7 +1458,8 @@ class TestWebDeploy:
         tmp_config_file.write_text(json.dumps({
             "whitelist": [{"ip": "1.1.1.1"}],
             "servers": [],
-            "settings": {"ssh_port": 22, "persist_rules": True},
+            "settings": {"ssh_port": 22, "persist_rules": True,
+                         "auth": {"username": "admin", "password_hash": web_app._hash_password("admin"), "password_changed": True}},
         }), encoding="utf-8")
         resp = logged_in_client.post("/api/deploy", json={})
         assert resp.status_code == 400
@@ -1461,7 +1652,7 @@ class TestWebApplications:
         app_id = apps[0]["id"]
 
         resp = logged_in_client.post(f"/api/applications/{app_id}/review", json={
-            "action": "reject"
+            "action": "reject", "servers": ["10.0.0.1"]
         })
         assert resp.status_code == 200
         assert resp.get_json()["success"] is True
@@ -1587,6 +1778,158 @@ class TestWebApplications:
         assert saved["servers"][0]["whitelist"][0]["ip"] == "203.0.113.5"
 
 
+class TestPerServerApplicationReviews:
+    @staticmethod
+    def _submit(client, ip="198.51.100.10"):
+        response = client.post("/api/apply", json={
+            "ip": ip, "name": "申请人", "employee_id": "E-MULTI",
+            "purpose": "跨服务器申请", "duration": "7d",
+            "servers": ["10.0.0.1", "10.0.0.2"],
+        })
+        assert response.status_code == 200
+        return response.get_json()["id"]
+
+    def test_two_admins_review_independently_and_first_decision_wins(
+            self, scoped_client, tmp_config_file):
+        app_id = self._submit(scoped_client)
+        mixed_scope = scoped_client.post(f"/api/applications/{app_id}/review", json={
+            "action": "approve", "servers": ["10.0.0.1", "10.0.0.2"],
+        })
+        assert mixed_scope.status_code == 403
+        approve = scoped_client.post(f"/api/applications/{app_id}/review", json={
+            "action": "approve", "servers": ["10.0.0.1"],
+            "description": "server-one-approved", "expire_at": "1d",
+        })
+        assert approve.status_code == 200
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        app_item = next(a for a in saved["applications"] if a["id"] == app_id)
+        assert app_item["status"] == "pending"
+        assert app_item["server_reviews"]["10.0.0.1"]["reviewed_by"] == "ops1"
+
+        shared = _new_web_client()
+        assert _login(shared, "ops-shared", "ops-shared").status_code == 200
+        duplicate = shared.post(f"/api/applications/{app_id}/review", json={
+            "action": "reject", "servers": ["10.0.0.1"],
+        })
+        assert duplicate.status_code == 409
+
+        ops2 = _new_web_client()
+        assert _login(ops2, "ops2", "ops-pass-2").status_code == 200
+        reject = ops2.post(f"/api/applications/{app_id}/review", json={
+            "action": "reject", "servers": ["10.0.0.2"],
+        })
+        assert reject.status_code == 200
+
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        app_item = next(a for a in saved["applications"] if a["id"] == app_id)
+        assert app_item["status"] == "approved"
+        assert app_item["approved_servers"] == ["10.0.0.1"]
+        assert app_item["deployed"] is False
+        assert app_item["server_reviews"]["10.0.0.2"]["reviewed_by"] == "ops2"
+
+        ops1_view = next(a for a in scoped_client.get("/api/applications").get_json()["applications"]
+                         if a["id"] == app_id)
+        ops2_view = next(a for a in ops2.get("/api/applications").get_json()["applications"]
+                         if a["id"] == app_id)
+        assert ops1_view["servers"] == ["10.0.0.1"]
+        assert set(ops1_view["server_reviews"]) == {"10.0.0.1"}
+        assert ops2_view["servers"] == ["10.0.0.2"]
+        assert set(ops2_view["server_reviews"]) == {"10.0.0.2"}
+
+    def test_per_server_expiry_and_partial_deploy_aggregation(
+            self, scoped_client, tmp_config_file, monkeypatch):
+        app_id = self._submit(scoped_client, ip="198.51.100.20")
+        assert scoped_client.post(f"/api/applications/{app_id}/review", json={
+            "action": "approve", "servers": ["10.0.0.1"], "expire_at": "1d",
+        }).status_code == 200
+        ops2 = _new_web_client()
+        assert _login(ops2, "ops2", "ops-pass-2").status_code == 200
+        assert ops2.post(f"/api/applications/{app_id}/review", json={
+            "action": "approve", "servers": ["10.0.0.2"], "expire_at": "2d",
+        }).status_code == 200
+
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        app_item = next(a for a in saved["applications"] if a["id"] == app_id)
+        first_expire = app_item["server_reviews"]["10.0.0.1"]["expire_at"]
+        second_expire = app_item["server_reviews"]["10.0.0.2"]["expire_at"]
+        assert first_expire != second_expire
+        assert app_item["status"] == "approved"
+
+        monkeypatch.setattr(web_app, "has_locked_recovery_path", lambda *args: True)
+        monkeypatch.setattr(
+            web_app, "capture_run",
+            lambda server, script, **kwargs: (server["host"] == "10.0.0.1", "deploy-output"),
+        )
+        assert scoped_client.post("/api/applications/deploy", json={}).get_json()["success"] is True
+        assert ops2.post("/api/applications/deploy", json={}).get_json()["success"] is False
+
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        app_item = next(a for a in saved["applications"] if a["id"] == app_id)
+        assert app_item["server_reviews"]["10.0.0.1"]["deployed"] is True
+        assert app_item["server_reviews"]["10.0.0.2"]["deployed"] is False
+        assert app_item["deployed"] is False
+
+        monkeypatch.setattr(web_app, "capture_run", lambda server, script, **kwargs: (True, "ok"))
+        assert ops2.post("/api/applications/deploy", json={}).get_json()["success"] is True
+        saved = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        app_item = next(a for a in saved["applications"] if a["id"] == app_id)
+        assert app_item["deployed"] is True
+
+    @pytest.mark.parametrize("legacy_status,approved,expected", [
+        ("pending", [], {"10.0.0.1": "pending", "10.0.0.2": "pending"}),
+        ("approved", ["10.0.0.1"], {"10.0.0.1": "approved", "10.0.0.2": "rejected"}),
+        ("rejected", [], {"10.0.0.1": "rejected", "10.0.0.2": "rejected"}),
+    ])
+    def test_legacy_application_migration(self, legacy_status, approved, expected):
+        app_item = {
+            "servers": ["10.0.0.1", "10.0.0.2"], "status": legacy_status,
+            "approved_servers": approved, "deployed": False, "purpose": "legacy",
+        }
+        assert web_app._ensure_server_reviews(app_item) is True
+        assert {host: review["status"] for host, review in app_item["server_reviews"].items()} == expected
+
+    def test_timeout_rejects_only_pending_server(self, web_client, multi_admin_config,
+                                                 tmp_config_file):
+        cfg = multi_admin_config
+        old = (datetime.datetime.now() - datetime.timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S")
+        cfg["applications"] = [{
+            "id": "PARTIAL-STALE", "ip": "198.51.100.30", "name": "x",
+            "employee_id": "x", "purpose": "x", "duration": "7d",
+            "servers": ["10.0.0.1", "10.0.0.2"], "created_at": old,
+            "server_reviews": {
+                "10.0.0.1": {"status": "approved", "reviewed_by": "ops1",
+                               "reviewed_at": old, "expire_at": None, "deployed": False},
+                "10.0.0.2": {"status": "pending", "reviewed_by": None,
+                               "reviewed_at": None, "expire_at": None, "deployed": False},
+            },
+            "status": "pending", "approved_servers": ["10.0.0.1"], "deployed": False,
+        }]
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        assert _login(web_client, "admin", "admin").status_code == 200
+        listed = web_client.get("/api/applications").get_json()["applications"][0]
+        assert listed["server_reviews"]["10.0.0.1"]["status"] == "approved"
+        assert listed["server_reviews"]["10.0.0.2"]["status"] == "rejected"
+        assert listed["server_reviews"]["10.0.0.2"]["auto_rejected"] is True
+        assert listed["status"] == "approved"
+
+    def test_scoped_admin_cannot_see_or_review_replace_history(
+            self, scoped_client, multi_admin_config, tmp_config_file):
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["applications"] = [{
+            "id": "REPLACE-HISTORY", "type": "replace", "ip": "198.51.100.40",
+            "old_ip": "203.0.113.5", "name": "x", "employee_id": "x", "purpose": "x",
+            "duration": "1d", "servers": ["10.0.0.1"], "status": "pending",
+            "approved_servers": [], "deployed": False,
+            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }]
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        assert scoped_client.get("/api/applications").get_json()["applications"] == []
+        response = scoped_client.post("/api/applications/REPLACE-HISTORY/review", json={
+            "action": "approve", "servers": ["10.0.0.1"],
+        })
+        assert response.status_code == 403
+
+
 # ── /api/settings ─────────────────────────────────────────────────────────
 
 class TestWebSettings:
@@ -1616,7 +1959,8 @@ class TestWebRemove:
     def test_remove_empty_servers(self, logged_in_client, tmp_config_file):
         tmp_config_file.write_text(json.dumps({
             "whitelist": [], "servers": [],
-            "settings": {"ssh_port": 22, "persist_rules": True},
+            "settings": {"ssh_port": 22, "persist_rules": True,
+                         "auth": {"username": "admin", "password_hash": web_app._hash_password("admin"), "password_changed": True}},
         }), encoding="utf-8")
         resp = logged_in_client.post("/api/remove", json={})
         assert resp.status_code == 400
@@ -1760,6 +2104,247 @@ class TestWebConfig:
         data = resp.get_json()
         for s in data.get("servers", []):
             assert "password" not in s
+        assert set(data["settings"]) == {"ssh_port", "persist_rules", "proxy", "auto_deploy"}
+        payload = json.dumps(data)
+        assert "password_hash" not in payload
+        assert "secret_key" not in payload
+        assert "encryption_key" not in payload
+
+
+class TestScopedAdminIsolation:
+    def test_config_only_contains_assigned_server_specific_data(self, scoped_client):
+        response = scoped_client.get("/api/config")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["current_user"] == {
+            "username": "ops1", "role": "scoped_admin",
+            "server_hosts": ["10.0.0.1"], "must_change_password": False,
+        }
+        assert data["capabilities"]["is_superadmin"] is False
+        assert "whitelist" not in data
+        assert "public_key_whitelist" not in data
+        assert "settings" not in data
+        assert len(data["servers"]) == 1
+        server = data["servers"][0]
+        assert set(server) == {
+            "host", "name", "enabled", "whitelist", "public_key_whitelist",
+        }
+        assert server["host"] == "10.0.0.1"
+        assert {e["ip"] for e in server["whitelist"]} == {"10.10.10.10", "10.10.10.11"}
+
+        payload = json.dumps(data, ensure_ascii=False)
+        for secret in (
+            "203.0.113.0/24", "2001:db8::/64", "global-v4-secret",
+            fake_public_key(suffix=b"global-secret-key").split()[1],
+            "GLOBAL-SECRET-FINGERPRINT", "GLOBAL-KEY-ID",
+            "server-two-secret", "server-one-password", "id_one",
+            "flask-secret-must-not-leak", "MDEyMzQ1Njc4OWFiY2RlZg", "global-proxy-secret",
+        ):
+            assert secret not in payload
+
+    @pytest.mark.parametrize("method,path,json_body", [
+        ("post", "/api/whitelist", {"ip": "10.1.1.1"}),
+        ("post", "/api/public-keys", {"public_key": "x", "linux_user": "root"}),
+        ("patch", "/api/settings", {"ssh_port": 2200}),
+        ("patch", "/api/scheduler", {"enabled": False}),
+        ("get", "/api/admins", None),
+        ("post", "/api/servers", {"host": "10.0.0.3"}),
+        ("patch", "/api/servers/10.0.0.1", {"password": "stolen"}),
+        ("post", "/api/servers/10.0.0.1/toggle", {"enabled": False}),
+        ("delete", "/api/servers/10.0.0.1?force=1", None),
+        ("post", "/api/remove", {}),
+        ("post", "/api/deploy", {"audit": True, "dry_run": True}),
+    ])
+    def test_superadmin_only_endpoints_are_forbidden(self, scoped_client, method, path,
+                                                     json_body):
+        call = getattr(scoped_client, method)
+        kwargs = {} if json_body is None else {"json": json_body}
+        assert call(path, **kwargs).status_code == 403
+
+    @pytest.mark.parametrize("method,path,json_body", [
+        ("post", "/api/servers/10.0.0.2/whitelist", {"ip": "10.2.2.2"}),
+        ("post", "/api/servers/server2/whitelist", {"ip": "10.2.2.2"}),
+        ("patch", "/api/servers/10.0.0.2/whitelist/10.20.20.20", {"description": "x"}),
+        ("delete", "/api/servers/10.0.0.2/whitelist/10.20.20.20", None),
+        ("post", "/api/servers/10.0.0.2/public-keys",
+         {"public_key": "invalid", "linux_user": "root"}),
+    ])
+    def test_direct_host_and_alias_scope_bypass_is_forbidden(self, scoped_client, method,
+                                                             path, json_body):
+        call = getattr(scoped_client, method)
+        kwargs = {} if json_body is None else {"json": json_body}
+        assert call(path, **kwargs).status_code == 403
+
+    def test_filter_scope_and_empty_filter_only_run_assigned_servers(self, scoped_client):
+        assert scoped_client.post("/api/deploy", json={
+            "server": "10.0.0.2", "dry_run": True,
+        }).status_code == 403
+        assert scoped_client.post("/api/deploy", json={
+            "server": "server2", "dry_run": True,
+        }).status_code == 403
+        assert scoped_client.get("/api/status?server=10.0.0.2").status_code == 403
+        assert scoped_client.get("/api/status?server=server2").status_code == 403
+        assert scoped_client.get("/api/audit-log?server=10.0.0.2").status_code == 403
+
+        dry_run = scoped_client.post("/api/deploy", json={"dry_run": True}).get_json()
+        assert dry_run["total"] == 1
+        assert [r["host"] for r in dry_run["results"]] == ["10.0.0.1"]
+        assert "脚本已隐藏" in dry_run["results"][0]["output"]
+        status = scoped_client.get("/api/status").get_json()
+        audit = scoped_client.get("/api/audit-log").get_json()
+        assert [r["host"] for r in status["results"]] == ["10.0.0.1"]
+        assert [r["host"] for r in audit["results"]] == ["10.0.0.1"]
+
+    def test_empty_combined_policy_uses_non_disclosing_error(self, scoped_client,
+                                                             tmp_config_file):
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["whitelist"] = []
+        cfg["public_key_whitelist"] = []
+        cfg["servers"][0]["whitelist"] = []
+        cfg["servers"][0]["public_key_whitelist"] = []
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+        response = scoped_client.post("/api/deploy", json={"dry_run": True})
+        assert response.status_code == 400
+        assert response.get_json()["message"] == "当前配置无法安全下发，请联系超级管理员"
+
+    def test_assigned_entries_mutable_but_locked_entries_are_read_only(self, scoped_client):
+        added = scoped_client.post("/api/servers/server1/whitelist",
+                                   json={"ip": "10.10.10.12", "description": "ops-added"})
+        assert added.status_code == 200
+        assert scoped_client.patch(
+            "/api/servers/10.0.0.1/whitelist/10.10.10.12",
+            json={"description": "ops-updated"},
+        ).status_code == 200
+        assert scoped_client.delete(
+            "/api/servers/10.0.0.1/whitelist/10.10.10.12"
+        ).status_code == 200
+
+        assert scoped_client.patch(
+            "/api/servers/10.0.0.1/whitelist/10.10.10.11",
+            json={"description": "forbidden"},
+        ).status_code == 403
+        assert scoped_client.delete(
+            "/api/servers/10.0.0.1/whitelist/10.10.10.11"
+        ).status_code == 403
+        assert scoped_client.patch(
+            "/api/servers/10.0.0.1/whitelist/10.10.10.11/lock",
+            json={"locked": False},
+        ).status_code == 403
+
+        key_added = scoped_client.post("/api/servers/10.0.0.1/public-keys", json={
+            "public_key": fake_public_key(suffix=b"ops-new-key"),
+            "linux_user": "carol", "description": "ops-key",
+        })
+        assert key_added.status_code == 200
+        assert scoped_client.patch(
+            "/api/servers/10.0.0.1/public-keys/alice:SERVER1-LOCKED",
+            json={"description": "forbidden"},
+        ).status_code == 403
+        assert scoped_client.patch(
+            "/api/servers/10.0.0.1/public-keys/alice:SERVER1-LOCKED/lock",
+            json={"locked": False},
+        ).status_code == 403
+
+    def test_run_outputs_redact_global_ipv4_ipv6_keys_and_fingerprints(
+            self, scoped_client, multi_admin_config, monkeypatch):
+        global_key = multi_admin_config["public_key_whitelist"][0]["public_key"]
+        global_key_blob = global_key.split()[1]
+        sensitive_output = (
+            "SRC=203.0.113.42:22 IPV6=2001:db8::42 MAPPED=::ffff:203.0.113.43 "
+            "SPECIFIC=10.10.10.10\n"
+            "白名单 IP: 203.0.113.0/24 10.10.10.10\n"
+            "托管公钥: 4 个 Linux 用户\n"
+            "[+] 允许 IP: 203.0.113.44\n"
+            "[+] 允许 IP: 2001:db8::44\n"
+            "[+] 允许 IP: 10.10.10.10\n"
+            "Match Address 203.0.113.0/24\n"
+            f"{global_key}\n"
+            "SHA256:GLOBAL-SECRET-FINGERPRINT root:GLOBAL-KEY-ID"
+        )
+        scripts = []
+
+        def fake_capture(server, script, **kwargs):
+            scripts.append(script)
+            return True, sensitive_output
+
+        monkeypatch.setattr(web_app, "capture_run", fake_capture)
+        monkeypatch.setattr(web_app, "has_locked_recovery_path", lambda *args: True)
+
+        dry_run = scoped_client.post("/api/deploy", json={"dry_run": True}).get_json()
+        assert scripts == []
+        assert "203.0.113" not in json.dumps(dry_run)
+
+        responses = [
+            scoped_client.post("/api/deploy", json={}),
+            scoped_client.get("/api/status"),
+            scoped_client.get("/api/audit-log"),
+        ]
+        for response in responses:
+            assert response.status_code == 200
+            payload = json.dumps(response.get_json(), ensure_ascii=False)
+            for secret in (
+                "203.0.113.42", "203.0.113.43", "203.0.113.0/24", "2001:db8::42",
+                global_key_blob, "GLOBAL-SECRET-FINGERPRINT", "GLOBAL-KEY-ID",
+            ):
+                assert secret not in payload
+            assert "10.10.10.10" in payload
+            assert "托管公钥: 4" not in payload
+            assert "[+] 允许 IP: [全局" not in payload
+            assert "[策略] 合并后的 IP 规则内容已隐藏" in payload
+        status_script = scripts[1]
+        assert "Match Address" not in status_script
+        assert "authorized_keys" not in status_script
+        assert "--list-rich-rules" in status_script
+
+    def test_self_service_history_filters_global_and_unassigned_results(
+            self, scoped_client, tmp_config_file):
+        cfg = json.loads(tmp_config_file.read_text(encoding="utf-8"))
+        cfg["self_service_log"] = [
+            {
+                "scope": "global", "old_ip": "203.0.113.9", "new_ip": "203.0.113.10",
+                "servers": ["10.0.0.1", "10.0.0.2"], "deploy_results": [],
+            },
+            {
+                "scope": "server", "old_ip": "10.10.10.10", "new_ip": "10.10.10.12",
+                "servers": ["10.0.0.1", "10.0.0.2"],
+                "deploy_results": [
+                    {"host": "10.0.0.1", "success": True,
+                     "output": "SRC=203.0.113.42 SHA256:GLOBAL-SECRET-FINGERPRINT visible"},
+                    {"host": "10.0.0.2", "success": False, "output": "server-two-secret"},
+                ],
+            },
+        ]
+        tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+        records = scoped_client.get("/api/self-service-log").get_json()["records"]
+        assert len(records) == 1
+        assert records[0]["servers"] == ["10.0.0.1"]
+        assert [r["host"] for r in records[0]["deploy_results"]] == ["10.0.0.1"]
+        payload = json.dumps(records, ensure_ascii=False)
+        assert "203.0.113" not in payload
+        assert "GLOBAL-SECRET-FINGERPRINT" not in payload
+        assert "server-two-secret" not in payload
+
+    def test_public_guest_deploy_result_also_hides_global_rules(
+            self, web_client, multi_admin_config, monkeypatch):
+        monkeypatch.setattr(web_app, "has_locked_recovery_path", lambda *args: True)
+        monkeypatch.setattr(
+            web_app, "capture_run",
+            lambda server, script, **kwargs: (
+                True,
+                "白名单 IP: 203.0.113.0/24 10.10.10.99\n"
+                "[+] 允许 IP: 203.0.113.42\n"
+                "SHA256:GLOBAL-SECRET-FINGERPRINT",
+            ),
+        )
+        response = web_client.post("/api/guest/replace", json={
+            "old_ip": "10.10.10.10", "new_ip": "10.10.10.99",
+        })
+        assert response.status_code == 200
+        payload = response.get_json()["deploy_result"]
+        assert "203.0.113" not in payload
+        assert "GLOBAL-SECRET-FINGERPRINT" not in payload
+        assert "10.10.10.99" not in payload  # 合并列表整行隐藏，不暴露全局规则数量
 
 
 # ── /api/scheduler ───────────────────────────────────────────────────────
@@ -2248,7 +2833,8 @@ class TestDeploySkipsDisabled:
                  "name": "s2", "password": "", "whitelist": [], "enabled": False},
             ],
             "settings": {"ssh_port": 22, "persist_rules": True,
-                         "auto_deploy": {"enabled": False, "interval_minutes": 5}},
+                         "auto_deploy": {"enabled": False, "interval_minutes": 5},
+                         "auth": {"username": "admin", "password_hash": web_app._hash_password("admin"), "password_changed": True}},
         }
         tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
 
@@ -2280,7 +2866,8 @@ class TestDeploySkipsDisabled:
                  "status": "approved", "approved_servers": ["10.0.0.2"], "deployed": False,
                  "created_at": "2025-01-01 00:00:00"},
             ],
-            "settings": {"ssh_port": 22, "persist_rules": True},
+            "settings": {"ssh_port": 22, "persist_rules": True,
+                         "auth": {"username": "admin", "password_hash": web_app._hash_password("admin"), "password_changed": True}},
         }
         tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
         cap = mock.MagicMock(return_value=(True, ""))
@@ -2305,7 +2892,8 @@ class TestReviewExcludesDisabled:
                  "status": "pending", "approved_servers": [], "deployed": False,
                  "created_at": "2025-01-01 00:00:00"},
             ],
-            "settings": {"ssh_port": 22, "persist_rules": True},
+            "settings": {"ssh_port": 22, "persist_rules": True,
+                         "auth": {"username": "admin", "password_hash": web_app._hash_password("admin"), "password_changed": True}},
         }
         tmp_config_file.write_text(json.dumps(cfg), encoding="utf-8")
         resp = logged_in_client.post("/api/applications/app1/review",

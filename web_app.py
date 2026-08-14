@@ -19,13 +19,14 @@ import threading
 import datetime
 import getpass
 import argparse
+import ipaddress
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from pathlib import Path
 
 try:
-    from flask import Flask, jsonify, request, render_template, session, redirect, url_for
+    from flask import Flask, jsonify, request, render_template, session, redirect, url_for, g
 except ImportError:
     print("[ERROR] 请先安装 Flask:  pip install flask")
     sys.exit(1)
@@ -102,44 +103,124 @@ def _verify_password(password: str, stored: str) -> bool:
         return False
 
 
-def _get_auth_cfg() -> dict:
-    """返回 config.json 中的 auth 配置（不存在则返回默认值）。"""
-    try:
-        if CONFIG_FILE.exists():
-            with CONFIG_LOCK:
-                with open(CONFIG_FILE, encoding="utf-8") as f:
-                    raw = json.load(f)
-            return raw.get("settings", {}).get("auth", {})
-    except Exception:
-        pass
-    return {}
+def _normalize_auth_accounts(cfg: dict) -> tuple[list[dict], bool]:
+    """返回账号列表，并把旧单账号结构原地迁移为 accounts。"""
+    settings = cfg.setdefault("settings", {})
+    auth = settings.setdefault("auth", {})
+    accounts = auth.get("accounts")
+    changed = False
+
+    if not isinstance(accounts, list) or not accounts:
+        username = (auth.get("username") or "admin").strip() or "admin"
+        password_hash = auth.get("password_hash") or _hash_password("admin")
+        accounts = [{
+            "username": username,
+            "password_hash": password_hash,
+            "role": "superadmin",
+            "enabled": True,
+            "server_hosts": [],
+            "password_changed": bool(auth.get("password_changed", False)),
+            "session_version": 1,
+            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "created_by": "system",
+        }]
+        auth.clear()
+        auth["accounts"] = accounts
+        changed = True
+
+    for account in accounts:
+        defaults = {
+            "role": "scoped_admin",
+            "enabled": True,
+            "server_hosts": [],
+            "password_changed": False,
+            "session_version": 1,
+        }
+        for key, value in defaults.items():
+            if key not in account:
+                account[key] = value
+                changed = True
+    return accounts, changed
+
+
+def _find_account(cfg: dict, username: str) -> dict | None:
+    accounts, _ = _normalize_auth_accounts(cfg)
+    folded = username.casefold()
+    return next((a for a in accounts if a.get("username", "").casefold() == folded), None)
+
+
+def _load_auth_config(*, persist_migration: bool = False) -> tuple[dict, list[dict]]:
+    cfg = load_config(purge=False)
+    accounts, changed = _normalize_auth_accounts(cfg)
+    if changed and persist_migration:
+        save_config(cfg)
+    return cfg, accounts
+
+
+def _is_superadmin(account: dict | None = None) -> bool:
+    account = account or getattr(g, "current_account", None)
+    return bool(account and account.get("role") == "superadmin")
+
+
+def _allowed_server_hosts(cfg: dict, account: dict | None = None) -> set[str]:
+    account = account or getattr(g, "current_account", None)
+    if _is_superadmin(account):
+        return {s["host"] for s in cfg.get("servers", [])}
+    assigned = set((account or {}).get("server_hosts", []))
+    return {s["host"] for s in cfg.get("servers", []) if s["host"] in assigned}
+
+
+def _server_for_account(cfg: dict, host_or_name: str) -> tuple[dict | None, tuple | None]:
+    server = _find_server(cfg, host_or_name)
+    if not server:
+        return None, (jsonify({"success": False, "message": f"未找到服务器: {host_or_name}"}), 404)
+    if server["host"] not in _allowed_server_hosts(cfg):
+        return None, (jsonify({"success": False, "message": "无权管理该服务器"}), 403)
+    return server, None
+
+
+def _servers_for_account(cfg: dict, host_or_name: str | None = None) -> tuple[list[dict] | None, tuple | None]:
+    allowed = _allowed_server_hosts(cfg)
+    if host_or_name:
+        server, error = _server_for_account(cfg, host_or_name)
+        return ([server] if server else None), error
+    return [s for s in cfg.get("servers", []) if s["host"] in allowed], None
+
+
+def superadmin_required(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not _is_superadmin():
+            return jsonify({"success": False, "message": "仅超级管理员可执行此操作"}), 403
+        return fn(*args, **kwargs)
+    return wrapped
+
+
+def config_update_locked(fn):
+    """串行化 Web 端配置读改写；CONFIG_LOCK 为可重入锁。"""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with CONFIG_LOCK:
+            return fn(*args, **kwargs)
+    return wrapped
 
 
 def _setup_app_secret():
     """从 config.json 加载或生成 Flask secret_key，并写回 config。"""
     try:
-        if CONFIG_FILE.exists():
-            with CONFIG_LOCK:
-                with open(CONFIG_FILE, encoding="utf-8") as f:
-                    raw = json.load(f)
-            key = raw.get("settings", {}).get("secret_key")
-            if key:
-                app.secret_key = key
-                return
-        # 生成新密钥并写入 config
-        cfg = load_config()
-        new_key = secrets.token_hex(32)
-        cfg["settings"]["secret_key"] = new_key
-        # 若尚无 auth 配置，设置默认账户
-        auth = cfg["settings"].setdefault("auth", {})
-        if not auth.get("username"):
-            auth["username"] = "admin"
-        if not auth.get("password_hash"):
-            auth["password_hash"] = _hash_password("admin")
-            auth["password_changed"] = False
-            print("[INFO] 已初始化默认账户: admin / admin  请登录后及时修改密码")
-        save_config(cfg)
-        app.secret_key = new_key
+        cfg = load_config(purge=False)
+        settings = cfg.setdefault("settings", {})
+        changed = False
+        key = settings.get("secret_key")
+        if not key:
+            key = secrets.token_hex(32)
+            settings["secret_key"] = key
+            changed = True
+        _, auth_changed = _normalize_auth_accounts(cfg)
+        changed = changed or auth_changed
+        if changed:
+            save_config(cfg)
+        app.secret_key = key
     except Exception:
         app.secret_key = secrets.token_hex(32)
 
@@ -183,6 +264,22 @@ def _require_login():
         if request.path.startswith("/api/"):
             return jsonify({"success": False, "message": "未登录"}), 401
         return redirect(url_for("login_page"))
+
+    cfg, _ = _load_auth_config()
+    account = _find_account(cfg, session.get("username", ""))
+    if (not account or not account.get("enabled", True)
+            or int(account.get("session_version", 1)) != int(session.get("session_version", 0))):
+        session.clear()
+        if request.path.startswith("/api/"):
+            return jsonify({"success": False, "message": "登录状态已失效"}), 401
+        return redirect(url_for("login_page"))
+    g.current_account = account
+    if not account.get("password_changed", False):
+        session["must_change_password"] = True
+
+    if (session.get("must_change_password") and request.method in ("POST", "PUT", "PATCH", "DELETE")
+            and request.path not in ("/api/auth/password", "/api/logout")):
+        return jsonify({"success": False, "message": "请先修改临时密码"}), 403
 
     # CSRF 校验：所有状态变更请求必须携带有效 token
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -237,20 +334,20 @@ def api_login():
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
 
-    auth = _get_auth_cfg()
-    expected_user = auth.get("username") or "admin"
-    password_hash = auth.get("password_hash") or ""
-
-    if username != expected_user or not _verify_password(password, password_hash):
+    cfg, accounts = _load_auth_config(persist_migration=True)
+    account = next((a for a in accounts if a.get("username", "").casefold() == username.casefold()), None)
+    if (not account or not account.get("enabled", True)
+            or not _verify_password(password, account.get("password_hash") or "")):
         return jsonify({"success": False, "message": "用户名或密码错误"}), 401
 
     # 重新生成 session 防止 session fixation 攻击
     session.clear()
     session["authenticated"] = True
-    session["username"] = username
+    session["username"] = account["username"]
+    session["session_version"] = int(account.get("session_version", 1))
 
     # 检查是否需要强制修改默认密码
-    need_change = not auth.get("password_changed", False)
+    need_change = not account.get("password_changed", False)
     if need_change:
         session["must_change_password"] = True
 
@@ -291,6 +388,7 @@ def api_logout():
 
 
 @public_route("/api/guest/replace", methods=["POST"])
+@config_update_locked
 def api_guest_replace():
     """Guest 自助替换 IP：原地更新旧 IP 为新 IP 并立即下发到受影响的服务器。
 
@@ -375,8 +473,10 @@ def api_guest_replace():
         keys = get_merged_public_keys(server, global_public_keys)
         if keys and not has_locked_recovery_path(
                 server, get_outgoing_ip(server["host"]), global_whitelist, keys):
+            message = ("[ERROR] 缺少永久锁定的管理恢复通道，拒绝首次启用混合模式"
+                       if _is_superadmin() else "[ERROR] 安全检查未通过，请联系超级管理员检查恢复通道")
             return {"server": server.get("name", server["host"]), "host": server["host"],
-                    "success": False, "output": "[ERROR] 缺少永久锁定的管理恢复通道，拒绝首次启用混合模式"}
+                    "success": False, "output": message}
         script = generate_apply_script(merged, ssh_port, persist, public_keys=keys)
         ok, output = capture_run(server, script, config=cfg)
         return {
@@ -398,6 +498,7 @@ def api_guest_replace():
         "description": original_description,
         "expire_at": original_expire_at,
         "servers": [s["host"] for s in servers_to_deploy],
+        "scope": "global" if found_global else "server",
         "deploy_results": [
             {"host": r["host"], "server": r["server"], "success": r["success"]}
             for r in results
@@ -410,8 +511,14 @@ def api_guest_replace():
     cfg.setdefault("self_service_log", []).append(record)
     save_config(cfg)
 
+    visible_results = []
+    for result in results:
+        item = dict(result)
+        item["output"] = _redact_sensitive_output(item.get("output", ""), cfg)
+        visible_results.append(item)
+
     deploy_log = ""
-    for r in results:
+    for r in visible_results:
         deploy_log += f"{'=' * 56}\n"
         deploy_log += f"  服务器: {r['server']} ({r['host']})  {'OK' if r['success'] else 'FAIL'}\n"
         deploy_log += f"{'-' * 56}\n"
@@ -435,6 +542,7 @@ def api_guest_replace():
 # ─── 自助申请白名单 ──────────────────────────────────────────────────────────
 
 @public_route("/api/apply", methods=["POST"])
+@config_update_locked
 def api_apply():
     """用户自助申请加入白名单（无需登录）。"""
     data = request.json or {}
@@ -494,6 +602,16 @@ def api_apply():
         "duration": duration,
         "expire_at": expire_at,
         "servers": servers,
+        "server_reviews": {
+            host: {
+                "status": "pending",
+                "reviewed_at": None,
+                "reviewed_by": None,
+                "description": None,
+                "expire_at": None,
+                "deployed": False,
+            } for host in servers
+        },
         "status": "pending",
         "approved_servers": [],
         "deployed": False,
@@ -506,218 +624,287 @@ def api_apply():
     return jsonify({"success": True, "message": "申请已提交，请等待管理员审核", "id": app_id})
 
 
-def _auto_reject_stale_applications(cfg: dict) -> int:
-    """把超过 PENDING_AUTO_REJECT_DAYS 天仍未处理的 pending 申请自动拒绝（原地修改 cfg）。
+def _sync_application_summary(app_item: dict) -> None:
+    reviews = app_item.get("server_reviews", {})
+    ordered = [reviews[h] for h in app_item.get("servers", []) if h in reviews]
+    statuses = [r.get("status", "pending") for r in ordered]
+    if not ordered:
+        return
+    approved = [h for h in app_item.get("servers", [])
+                if reviews.get(h, {}).get("status") == "approved"]
+    if any(status == "pending" for status in statuses):
+        app_item["status"] = "pending"
+    elif approved:
+        app_item["status"] = "approved"
+    else:
+        app_item["status"] = "rejected"
+    app_item["approved_servers"] = approved
+    app_item["deployed"] = bool(approved) and all(reviews[h].get("deployed", False) for h in approved)
+    decided = [r for r in ordered if r.get("reviewed_at")]
+    if decided and not any(status == "pending" for status in statuses):
+        latest = max(decided, key=lambda r: r.get("reviewed_at") or "")
+        app_item["reviewed_at"] = latest.get("reviewed_at")
+        app_item["reviewed_by"] = latest.get("reviewed_by")
+    app_item["auto_rejected"] = bool(ordered) and all(
+        r.get("status") == "rejected" and r.get("auto_rejected") for r in ordered
+    )
 
-    自动拒绝的申请打 auto_rejected=True 标记、reviewed_by="system"，与管理员手动拒绝区分。
-    返回本次被自动拒绝的数量。created_at 无法解析的申请跳过，避免误伤。
-    """
+
+def _ensure_server_reviews(app_item: dict) -> bool:
+    servers = list(dict.fromkeys(app_item.get("servers", [])))
+    app_item["servers"] = servers
+    reviews = app_item.get("server_reviews")
+    changed = not isinstance(reviews, dict)
+    if not isinstance(reviews, dict):
+        reviews = {}
+        legacy_status = app_item.get("status", "pending")
+        approved = set(app_item.get("approved_servers", []))
+        if legacy_status == "approved" and not approved:
+            approved = set(servers)
+        for host in servers:
+            if legacy_status == "pending":
+                status = "pending"
+            elif legacy_status == "approved" and host in approved:
+                status = "approved"
+            else:
+                status = "rejected"
+            reviews[host] = {
+                "status": status,
+                "reviewed_at": None if status == "pending" else app_item.get("reviewed_at"),
+                "reviewed_by": None if status == "pending" else app_item.get("reviewed_by"),
+                "description": app_item.get("purpose") if status == "approved" else None,
+                "expire_at": app_item.get("expire_at") if status == "approved" else None,
+                "deployed": bool(app_item.get("deployed")) if status == "approved" else False,
+            }
+            if app_item.get("auto_rejected") and status == "rejected":
+                reviews[host]["auto_rejected"] = True
+        app_item["server_reviews"] = reviews
+    for host in servers:
+        if host not in reviews:
+            reviews[host] = {
+                "status": "pending", "reviewed_at": None, "reviewed_by": None,
+                "description": None, "expire_at": None, "deployed": False,
+            }
+            changed = True
+    _sync_application_summary(app_item)
+    return changed
+
+
+def _application_view(app_item: dict, allowed_hosts: set[str] | None = None) -> dict:
+    view = json.loads(json.dumps(app_item))
+    _ensure_server_reviews(view)
+    if allowed_hosts is not None:
+        view["servers"] = [h for h in view.get("servers", []) if h in allowed_hosts]
+        view["server_reviews"] = {
+            h: r for h, r in view.get("server_reviews", {}).items() if h in allowed_hosts
+        }
+        _sync_application_summary(view)
+    return view
+
+
+def _auto_reject_stale_applications(cfg: dict) -> int:
     now = datetime.datetime.now()
     cutoff = now - datetime.timedelta(days=PENDING_AUTO_REJECT_DAYS)
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     count = 0
     for app_item in cfg.get("applications", []):
-        if app_item.get("status") != "pending":
-            continue
-        created_at = app_item.get("created_at")
-        if not created_at:
-            continue
+        _ensure_server_reviews(app_item)
         try:
-            created = datetime.datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+            created = datetime.datetime.strptime(app_item.get("created_at", ""), "%Y-%m-%d %H:%M:%S")
         except (ValueError, TypeError):
             continue
-        if created < cutoff:
-            app_item["status"] = "rejected"
-            app_item["reviewed_at"] = now_str
-            app_item["reviewed_by"] = "system"
-            app_item["auto_rejected"] = True
-            count += 1
+        if created >= cutoff:
+            continue
+        if not app_item.get("server_reviews"):
+            if app_item.get("status") == "pending":
+                app_item.update({"status": "rejected", "reviewed_at": now_str,
+                                 "reviewed_by": "system", "auto_rejected": True})
+                count += 1
+            continue
+        for review in app_item.get("server_reviews", {}).values():
+            if review.get("status") == "pending":
+                review.update({"status": "rejected", "reviewed_at": now_str,
+                               "reviewed_by": "system", "auto_rejected": True})
+                count += 1
+        _sync_application_summary(app_item)
     return count
 
 
 @app.route("/api/applications", methods=["GET"])
+@config_update_locked
 def api_applications_list():
-    """获取所有申请列表（管理员）。"""
     cfg = load_config(purge=False)
-    # 读时惰性处理：超期未审批的 pending 申请自动拒绝（有变更才回写）
-    if _auto_reject_stale_applications(cfg):
+    changed = False
+    for app_item in cfg.get("applications", []):
+        changed = _ensure_server_reviews(app_item) or changed
+    if _auto_reject_stale_applications(cfg) or changed:
         save_config(cfg)
-    apps = cfg.get("applications", [])
+    if _is_superadmin():
+        apps = [_application_view(a) for a in cfg.get("applications", [])]
+    else:
+        allowed = _allowed_server_hosts(cfg)
+        apps = [_application_view(a, allowed) for a in cfg.get("applications", [])
+                if a.get("type") != "replace" and allowed.intersection(a.get("servers", []))]
     return jsonify({"success": True, "applications": apps})
 
 
 @app.route("/api/self-service-log", methods=["GET"])
 def api_self_service_log():
-    """获取 Guest 自助换 IP 历史记录（最新优先）。"""
     cfg = load_config(purge=False)
     records = list(cfg.get("self_service_log", []))
+    if not _is_superadmin():
+        allowed = _allowed_server_hosts(cfg)
+        visible = []
+        for record in records:
+            if record.get("scope") != "server":
+                continue
+            item = json.loads(json.dumps(record))
+            item["servers"] = [h for h in item.get("servers", []) if h in allowed]
+            item["deploy_results"] = [r for r in item.get("deploy_results", [])
+                                      if r.get("host") in allowed]
+            item["deploy_results"] = _sanitize_run_results(item["deploy_results"], cfg)
+            if not item["servers"] and not item["deploy_results"]:
+                continue
+            item["success_count"] = sum(1 for r in item["deploy_results"] if r.get("success"))
+            item["total"] = len(item["deploy_results"])
+            item["all_success"] = item["total"] == 0 or item["success_count"] == item["total"]
+            visible.append(item)
+        records = visible
     records.reverse()
     return jsonify({"success": True, "records": records})
 
 
+def _application_expire_at(app_item: dict, raw_expire) -> str | None:
+    if raw_expire is None:
+        expire_at = app_item.get("expire_at")
+        duration = app_item.get("duration", "")
+        match = re.match(r'^(\d+)([dhm])$', duration.lower()) if duration else None
+        if match:
+            n, unit = int(match.group(1)), match.group(2)
+            delta = {"d": datetime.timedelta(days=n), "h": datetime.timedelta(hours=n),
+                     "m": datetime.timedelta(minutes=n)}[unit]
+            expire_at = (datetime.datetime.now() + delta).strftime("%Y-%m-%d %H:%M:%S")
+        return expire_at
+    stripped = str(raw_expire).strip()
+    if not stripped or stripped.lower() in ("never", "永久", "permanent"):
+        return None
+    return parse_expire(stripped)
+
+
 @app.route("/api/applications/<app_id>/review", methods=["POST"])
+@config_update_locked
 def api_applications_review(app_id):
-    """审核申请：批准（可部分）或拒绝。批准仅写入白名单，不下发。"""
     data = request.json or {}
     action = (data.get("action") or "").strip()
-    approved_servers = data.get("servers") or []
-
+    selected = list(dict.fromkeys(data.get("servers") or []))
     if action not in ("approve", "reject"):
         return jsonify({"success": False, "message": "操作必须为 approve 或 reject"}), 400
+    if not selected:
+        return jsonify({"success": False, "message": "请至少选择一台服务器"}), 400
 
     cfg = load_config()
-    apps = cfg.get("applications", [])
-    app = next((a for a in apps if a["id"] == app_id), None)
-    if not app:
+    app_item = next((a for a in cfg.get("applications", []) if a.get("id") == app_id), None)
+    if not app_item:
         return jsonify({"success": False, "message": "申请不存在"}), 404
-    if app["status"] != "pending":
-        return jsonify({"success": False, "message": f"申请状态为 {app['status']}，无法重复审核"}), 409
+    _ensure_server_reviews(app_item)
+    if app_item.get("type") == "replace" and not _is_superadmin():
+        return jsonify({"success": False, "message": "替换申请仅限超级管理员审核"}), 403
+    if any(h not in app_item.get("servers", []) for h in selected):
+        return jsonify({"success": False, "message": "所选服务器不在原始申请中"}), 400
+    allowed = _allowed_server_hosts(cfg)
+    if any(h not in allowed for h in selected):
+        return jsonify({"success": False, "message": "无权审核所选服务器"}), 403
+    reviews = app_item["server_reviews"]
+    if any(reviews[h].get("status") != "pending" for h in selected):
+        return jsonify({"success": False, "message": "所选服务器已被审核，不能重复处理"}), 409
 
-    reviewer = session.get("username", "admin")
+    reviewer = g.current_account["username"]
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     if action == "reject":
-        app["status"] = "rejected"
-        app["reviewed_at"] = now_str
-        app["reviewed_by"] = reviewer
+        for host in selected:
+            reviews[host].update({"status": "rejected", "reviewed_at": now_str,
+                                  "reviewed_by": reviewer, "deployed": False})
+        _sync_application_summary(app_item)
         save_config(cfg)
-        return jsonify({"success": True, "message": "申请已拒绝"})
+        return jsonify({"success": True, "message": f"已拒绝 {len(selected)} 台服务器的申请"})
 
-    # approve（可部分）
-    if not approved_servers:
-        return jsonify({"success": False, "message": "请至少选择一台服务器批准"}), 400
-
-    valid_hosts = {s["host"] for s in cfg.get("servers", []) if s.get("enabled", True)}
-    final_servers = [h for h in approved_servers if h in app["servers"] and h in valid_hosts]
-    if not final_servers:
-        return jsonify({"success": False, "message": "所选服务器均不在原始申请中、已禁用或已不存在"}), 400
-
-    is_replace = app.get("type") == "replace"
-
-    # replace 模式：删除旧 IP 前先检查锁定状态，与 Guest 自助换 IP / 全局编辑/删除接口
-    # 的锁定保护保持一致，避免 locked 的关键 IP（如管理服务器自身）被绕过删除。
+    enabled = {s["host"] for s in cfg.get("servers", []) if s.get("enabled", True)}
+    if any(h not in enabled for h in selected):
+        return jsonify({"success": False, "message": "所选服务器已禁用或不存在"}), 400
+    try:
+        expire_at = _application_expire_at(app_item, data.get("expire_at"))
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    custom_desc = data.get("description")
+    name_part = f"{app_item.get('name', '')} {app_item.get('employee_id', '')}".strip()
+    description = f"{name_part} {(custom_desc or app_item.get('purpose', '')).strip()}".strip()
+    is_replace = app_item.get("type") == "replace"
     if is_replace:
-        old_ip = app.get("old_ip", "")
-        locked_scope = None
-        for entry in cfg.get("whitelist", []):
-            if entry["ip"] == old_ip and entry.get("locked"):
-                locked_scope = "全局"
-                break
+        pending_hosts = {h for h, review in reviews.items() if review.get("status") == "pending"}
+        if set(selected) != pending_hosts:
+            return jsonify({"success": False, "message": "替换申请必须一次处理全部待审核服务器"}), 400
+        old_ip = app_item.get("old_ip", "")
+        locked_scope = next(("全局" for e in cfg.get("whitelist", [])
+                             if e.get("ip") == old_ip and e.get("locked")), None)
         if locked_scope is None:
-            for srv in cfg.get("servers", []):
-                for entry in srv.get("whitelist", []):
-                    if entry["ip"] == old_ip and entry.get("locked"):
-                        locked_scope = srv.get("name") or srv["host"]
-                        break
-                if locked_scope:
+            for server in cfg.get("servers", []):
+                if any(e.get("ip") == old_ip and e.get("locked")
+                       for e in server.get("whitelist", [])):
+                    locked_scope = server.get("name") or server["host"]
                     break
         if locked_scope:
-            return jsonify({
-                "success": False,
-                "message": f"{old_ip} 在 [{locked_scope}] 已被锁定，无法通过替换申请审批",
-            }), 403
+            return jsonify({"success": False,
+                            "message": f"{old_ip} 在 [{locked_scope}] 已被锁定，无法通过替换申请审批"}), 403
+        cfg["whitelist"] = [e for e in cfg.get("whitelist", []) if e.get("ip") != old_ip]
+        for server in cfg.get("servers", []):
+            server["whitelist"] = [e for e in server.get("whitelist", []) if e.get("ip") != old_ip]
 
-    # 审核人可覆盖有效期
-    raw_expire = data.get("expire_at")
-    if raw_expire is None:
-        duration = app.get("duration", "")
-        expire_at = app.get("expire_at")
-        m = re.match(r'^(\d+)([dhm])$', duration.lower()) if duration else None
-        if m:
-            n, unit = int(m.group(1)), m.group(2)
-            delta = {'d': datetime.timedelta(days=n),
-                     'h': datetime.timedelta(hours=n),
-                     'm': datetime.timedelta(minutes=n)}[unit]
-            expire_at = (datetime.datetime.now() + delta).strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        stripped = raw_expire.strip()
-        if not stripped or stripped.lower() in ('never', '永久', 'permanent'):
-            expire_at = None
+    skipped = []
+    for server in cfg.get("servers", []):
+        if server["host"] not in selected:
+            continue
+        whitelist = server.setdefault("whitelist", [])
+        if any(e.get("ip") == app_item.get("ip") for e in whitelist):
+            skipped.append(server.get("name") or server["host"])
         else:
-            try:
-                expire_at = parse_expire(stripped)
-            except ValueError:
-                return jsonify({"success": False, "message": f"无效的有效期格式: {stripped}"}), 400
-
-    # 构建备注：<姓名> <工号> <目的/自定义备注>
-    custom_desc = data.get("description")
-    name_part = f"{app.get('name', '')} {app.get('employee_id', '')}".strip()
-    if custom_desc is not None and custom_desc.strip():
-        description = f"{name_part} {custom_desc.strip()}".strip()
-    else:
-        description = f"{name_part} {app.get('purpose', '')}".strip()
-
-    # 收集因 IP 已存在被跳过的服务器，让审核人知道审批"成功"但部分服务器未变更——
-    # 此时不会覆盖原条目的 description / expire_at / added_by，避免静默改写旧申请的元数据。
-    skipped_hosts: list[str] = []
-
-    if is_replace:
-        # 替换模式：移除旧 IP，添加新 IP
-        old_ip = app.get("old_ip", "")
-        # ① 全局白名单中移除旧 IP
-        cfg["whitelist"] = [e for e in cfg.get("whitelist", []) if e["ip"] != old_ip]
-        # ② 各服务器专属白名单中移除旧 IP
-        for srv in cfg.get("servers", []):
-            srv["whitelist"] = [e for e in srv.get("whitelist", []) if e["ip"] != old_ip]
-        # ③ 添加新 IP 到批准的服务器专属白名单
-        for srv in cfg["servers"]:
-            if srv["host"] in final_servers:
-                wl = srv.setdefault("whitelist", [])
-                if any(e["ip"] == app["ip"] for e in wl):
-                    skipped_hosts.append(srv.get("name") or srv["host"])
-                    continue
-                entry = _make_ip_entry(app["ip"], description, expire_at, added_by=reviewer)
-                wl.append(entry)
-    else:
-        # 普通模式：添加 IP 到各服务器专属白名单
-        for srv in cfg["servers"]:
-            if srv["host"] in final_servers:
-                wl = srv.setdefault("whitelist", [])
-                if any(e["ip"] == app["ip"] for e in wl):
-                    skipped_hosts.append(srv.get("name") or srv["host"])
-                    continue
-                entry = _make_ip_entry(app["ip"], description, expire_at, added_by=reviewer)
-                wl.append(entry)
-
-    app["status"] = "approved"
-    app["approved_servers"] = final_servers
-    app["deployed"] = False
-    if expire_at:
-        app["expire_at"] = expire_at
-    app["reviewed_at"] = now_str
-    app["reviewed_by"] = reviewer
+            whitelist.append(_make_ip_entry(app_item["ip"], description, expire_at, added_by=reviewer))
+        reviews[server["host"]].update({
+            "status": "approved", "reviewed_at": now_str, "reviewed_by": reviewer,
+            "description": description, "expire_at": expire_at, "deployed": False,
+        })
+    _sync_application_summary(app_item)
     save_config(cfg)
-
-    msg = f"已批准 {app['ip']} 替换 {app.get('old_ip', '')} ({len(final_servers)} 台服务器)" if is_replace else f"已批准 {app['ip']} 加入 {len(final_servers)} 台服务器白名单（待下发）"
-    if skipped_hosts:
-        msg += f"；{len(skipped_hosts)} 台因 IP 已存在未覆盖：{', '.join(skipped_hosts)}"
-    return jsonify({"success": True, "message": msg})
+    message = f"已批准 {len(selected)} 台服务器（待下发）"
+    if skipped:
+        message += f"；{len(skipped)} 台因 IP 已存在未覆盖：{', '.join(skipped)}"
+    return jsonify({"success": True, "message": message})
 
 
 @app.route("/api/applications/deploy", methods=["POST"])
+@config_update_locked
 def api_applications_deploy():
-    """下发所有已批准但未部署的申请涉及的服务器。"""
     cfg = load_config()
-    apps = cfg.get("applications", [])
-    pending_deploy = [a for a in apps if a.get("status") == "approved" and not a.get("deployed")]
-
-    if not pending_deploy:
-        return jsonify({"success": False, "message": "没有待下发的申请"}), 400
-
-    # 收集所有需要下发的服务器 host
+    allowed = _allowed_server_hosts(cfg)
+    pending_apps = []
     affected_hosts = set()
-    for a in pending_deploy:
-        for h in a.get("approved_servers", []):
-            affected_hosts.add(h)
+    for app_item in cfg.get("applications", []):
+        _ensure_server_reviews(app_item)
+        eligible = {h for h, review in app_item["server_reviews"].items()
+                    if h in allowed and review.get("status") == "approved"
+                    and not review.get("deployed", False)}
+        if eligible:
+            pending_apps.append(app_item)
+            affected_hosts.update(eligible)
+    if not affected_hosts:
+        return jsonify({"success": False, "message": "没有待下发的申请"}), 400
 
     servers_to_deploy = [s for s in cfg.get("servers", [])
                          if s["host"] in affected_hosts and s.get("enabled", True)]
     if not servers_to_deploy:
         return jsonify({"success": False, "message": "没有找到需要下发的服务器（可能均已禁用）"}), 400
-
     ssh_port = cfg["settings"].get("ssh_port", 22)
     persist = cfg["settings"].get("persist_rules", True)
-    global_whitelist = cfg["whitelist"]
+    global_whitelist = cfg.get("whitelist", [])
     global_public_keys = cfg.get("public_key_whitelist", [])
 
     def _app_deploy_one(server):
@@ -725,48 +912,156 @@ def api_applications_deploy():
         keys = get_merged_public_keys(server, global_public_keys)
         if keys and not has_locked_recovery_path(
                 server, get_outgoing_ip(server["host"]), global_whitelist, keys):
+            message = ("[ERROR] 缺少永久锁定的管理恢复通道，拒绝首次启用混合模式"
+                       if _is_superadmin() else "[ERROR] 安全检查未通过，请联系超级管理员检查恢复通道")
             return {"server": server.get("name", server["host"]), "host": server["host"],
-                    "success": False, "output": "[ERROR] 缺少永久锁定的管理恢复通道，拒绝首次启用混合模式"}
+                    "success": False, "output": message}
         script = generate_apply_script(merged, ssh_port, persist, public_keys=keys)
         ok, output = capture_run(server, script, config=cfg)
-        return {
-            "server": server.get("name", server["host"]),
-            "host": server["host"],
-            "success": ok,
-            "output": output,
-        }
+        return {"server": server.get("name", server["host"]), "host": server["host"],
+                "success": ok, "output": output}
 
     results = _parallel_run(servers_to_deploy, _app_deploy_one)
-    success_count = sum(1 for r in results if r["success"])
-
-    # 仅标记所有目标服务器都成功部署的申请为已部署
-    succeeded_hosts = {r["host"] for r in results if r["success"]}
-    for a in pending_deploy:
-        app_servers = set(a.get("approved_servers", []))
-        if app_servers and app_servers.issubset(succeeded_hosts):
-            a["deployed"] = True
-    if succeeded_hosts:
+    succeeded = {r["host"] for r in results if r["success"]}
+    for app_item in pending_apps:
+        for host, review in app_item["server_reviews"].items():
+            if host in succeeded and review.get("status") == "approved":
+                review["deployed"] = True
+        _sync_application_summary(app_item)
+    if succeeded:
         save_config(cfg)
 
+    visible_results = _sanitize_run_results(results, cfg)
+    success_count = sum(1 for r in visible_results if r["success"])
     deploy_log = ""
-    for r in results:
-        deploy_log += f"{'=' * 56}\n"
-        deploy_log += f"  服务器: {r['server']} ({r['host']})  {'OK' if r['success'] else 'FAIL'}\n"
-        deploy_log += f"{'-' * 56}\n"
-        deploy_log += r["output"].rstrip() + "\n\n"
-    deploy_log += f"下发完成: {success_count}/{len(results)} 台成功"
+    for result in visible_results:
+        deploy_log += f"{'=' * 56}\n  服务器: {result['server']} ({result['host']})  {'OK' if result['success'] else 'FAIL'}\n"
+        deploy_log += f"{'-' * 56}\n{result['output'].rstrip()}\n\n"
+    deploy_log += f"下发完成: {success_count}/{len(visible_results)} 台成功"
+    return jsonify({"success": success_count > 0, "success_count": success_count,
+                    "total": len(visible_results), "message": deploy_log.splitlines()[-1],
+                    "deploy_result": deploy_log, "results": visible_results})
 
-    return jsonify({
-        "success": success_count > 0,
-        "success_count": success_count,
-        "total": len(results),
-        "message": f"下发完成: {success_count}/{len(results)} 台成功",
-        "deploy_result": deploy_log,
-        "results": results,
-    })
+
+def _account_safe(account: dict) -> dict:
+    return {
+        "username": account.get("username", ""),
+        "role": account.get("role", "scoped_admin"),
+        "enabled": bool(account.get("enabled", True)),
+        "server_hosts": list(account.get("server_hosts", [])),
+        "password_changed": bool(account.get("password_changed", False)),
+        "created_at": account.get("created_at"),
+        "created_by": account.get("created_by"),
+    }
+
+
+def _validate_account_hosts(cfg: dict, raw_hosts, *, allow_empty: bool = False) -> tuple[list[str] | None, tuple | None]:
+    if not isinstance(raw_hosts, list):
+        return None, (jsonify({"success": False, "message": "server_hosts 必须为数组"}), 400)
+    hosts = list(dict.fromkeys(str(h).strip() for h in raw_hosts if str(h).strip()))
+    if not hosts and not allow_empty:
+        return None, (jsonify({"success": False, "message": "请至少选择一台服务器"}), 400)
+    known = {s["host"] for s in cfg.get("servers", [])}
+    unknown = [h for h in hosts if h not in known]
+    if unknown:
+        return None, (jsonify({"success": False, "message": f"服务器不存在: {', '.join(unknown)}"}), 400)
+    return hosts, None
+
+
+@app.route("/api/admins", methods=["GET", "POST"])
+@superadmin_required
+@config_update_locked
+def api_admins():
+    cfg = load_config(purge=False)
+    accounts, _ = _normalize_auth_accounts(cfg)
+    if request.method == "GET":
+        return jsonify({"success": True, "admins": [_account_safe(a) for a in accounts]})
+
+    data = request.json or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", username):
+        return jsonify({"success": False, "message": "用户名仅支持字母、数字、点、下划线和短横线"}), 400
+    if len(password) < 6:
+        return jsonify({"success": False, "message": "临时密码至少 6 位"}), 400
+    if any(a.get("username", "").casefold() == username.casefold() for a in accounts):
+        return jsonify({"success": False, "message": "用户名已存在"}), 409
+    hosts, error = _validate_account_hosts(cfg, data.get("server_hosts"))
+    if error:
+        return error
+    account = {
+        "username": username,
+        "password_hash": _hash_password(password),
+        "role": "scoped_admin",
+        "enabled": True,
+        "server_hosts": hosts,
+        "password_changed": False,
+        "session_version": 1,
+        "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "created_by": g.current_account["username"],
+    }
+    accounts.append(account)
+    save_config(cfg)
+    return jsonify({"success": True, "message": f"已创建管理员 {username}",
+                    "admin": _account_safe(account)}), 201
+
+
+@app.route("/api/admins/<username>", methods=["PATCH", "DELETE"])
+@superadmin_required
+@config_update_locked
+def api_admin_item(username):
+    cfg = load_config(purge=False)
+    accounts, _ = _normalize_auth_accounts(cfg)
+    account = _find_account(cfg, username)
+    if not account:
+        return jsonify({"success": False, "message": "管理员账号不存在"}), 404
+    if account.get("role") == "superadmin":
+        return jsonify({"success": False, "message": "不能修改或删除超级管理员账号"}), 403
+
+    if request.method == "DELETE":
+        cfg["settings"]["auth"]["accounts"] = [a for a in accounts if a is not account]
+        save_config(cfg)
+        return jsonify({"success": True, "message": f"已删除管理员 {account['username']}"})
+
+    data = request.json or {}
+    if "server_hosts" in data:
+        hosts, error = _validate_account_hosts(cfg, data.get("server_hosts"), allow_empty=True)
+        if error:
+            return error
+        account["server_hosts"] = hosts
+    if "enabled" in data:
+        enabled = bool(data["enabled"])
+        if enabled != bool(account.get("enabled", True)):
+            account["enabled"] = enabled
+            account["session_version"] = int(account.get("session_version", 1)) + 1
+    save_config(cfg)
+    return jsonify({"success": True, "message": "管理员账号已更新",
+                    "admin": _account_safe(account)})
+
+
+@app.route("/api/admins/<username>/password", methods=["PATCH"])
+@superadmin_required
+@config_update_locked
+def api_admin_reset_password(username):
+    data = request.json or {}
+    new_pw = data.get("new_password") or ""
+    if len(new_pw) < 6:
+        return jsonify({"success": False, "message": "临时密码至少 6 位"}), 400
+    cfg = load_config(purge=False)
+    account = _find_account(cfg, username)
+    if not account:
+        return jsonify({"success": False, "message": "管理员账号不存在"}), 404
+    if account.get("role") == "superadmin":
+        return jsonify({"success": False, "message": "超级管理员请使用修改密码功能"}), 403
+    account["password_hash"] = _hash_password(new_pw)
+    account["password_changed"] = False
+    account["session_version"] = int(account.get("session_version", 1)) + 1
+    save_config(cfg)
+    return jsonify({"success": True, "message": f"已重置 {account['username']} 的密码"})
 
 
 @app.route("/api/auth/password", methods=["PATCH"])
+@config_update_locked
 def api_change_password():
     data = request.json or {}
     old_pw = data.get("old_password") or ""
@@ -775,15 +1070,17 @@ def api_change_password():
     if not new_pw or len(new_pw) < 6:
         return jsonify({"success": False, "message": "新密码至少 6 位"}), 400
 
-    cfg = load_config()
-    auth = cfg["settings"].setdefault("auth", {})
-    stored = auth.get("password_hash") or ""
+    cfg = load_config(purge=False)
+    account = _find_account(cfg, session.get("username", ""))
+    stored = (account or {}).get("password_hash") or ""
 
     if not _verify_password(old_pw, stored):
         return jsonify({"success": False, "message": "旧密码错误"}), 403
 
-    auth["password_hash"] = _hash_password(new_pw)
-    auth["password_changed"] = True
+    account["password_hash"] = _hash_password(new_pw)
+    account["password_changed"] = True
+    account["session_version"] = int(account.get("session_version", 1)) + 1
+    session["session_version"] = account["session_version"]
     session.pop("must_change_password", None)
     save_config(cfg)
     return jsonify({"success": True, "message": "密码已更新"})
@@ -949,6 +1246,7 @@ def _init_scheduler_from_config():
 # ─── API：调度器管理 ───────────────────────────────────────────────────────────
 
 @app.route("/api/scheduler", methods=["GET"])
+@superadmin_required
 def api_scheduler_get():
     with _sched_lock:
         t = _sched.get("thread")
@@ -963,6 +1261,8 @@ def api_scheduler_get():
 
 
 @app.route("/api/scheduler", methods=["PATCH"])
+@superadmin_required
+@config_update_locked
 def api_scheduler_patch():
     data = request.json or {}
     cfg = load_config()
@@ -1080,6 +1380,118 @@ def capture_run(server: dict, script: str, dry_run: bool = False, config: dict =
     return result, buf.getvalue()
 
 
+def _redact_sensitive_output(output: str, cfg: dict) -> str:
+    """从受限管理员可见输出中移除全局 IP、公钥内容和指纹。"""
+    redacted = output or ""
+    networks = []
+    for entry in cfg.get("whitelist", []):
+        token = entry.get("ip", "")
+        if token:
+            redacted = redacted.replace(token, "[全局 IP 已隐藏]")
+            try:
+                networks.append(ipaddress.ip_network(token, strict=False))
+            except ValueError:
+                pass
+
+    def _is_global_address_token(token: str) -> bool:
+        try:
+            address = ipaddress.ip_address(token)
+        except ValueError:
+            return False
+        candidates = [address]
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            candidates.append(address.ipv4_mapped)
+        return any(
+            candidate.version == network.version and candidate in network
+            for candidate in candidates for network in networks
+        )
+
+    # 下发脚本会先打印合并后的 IP 全量列表、公钥用户总数，并逐条打印允许 IP。
+    # 对受限管理员隐藏这些汇总；逐条输出中的全局规则整行移除，避免通过占位符数量
+    # 反推出全局规则数。服务器专属规则的普通输出仍保留。
+    filtered_lines = []
+    for line in redacted.splitlines(keepends=True):
+        stripped = line.strip()
+        newline = "\n" if line.endswith("\n") else ""
+        if stripped.startswith("白名单 IP:"):
+            filtered_lines.append("[策略] 合并后的 IP 规则内容已隐藏" + newline)
+            continue
+        if stripped.startswith("托管公钥:"):
+            filtered_lines.append("[策略] 合并后的公钥规则内容已隐藏" + newline)
+            continue
+        if stripped.startswith("[+] 允许 IP:") or stripped.startswith("[+] 白名单 IP（审计）:"):
+            candidate_line = line
+            for entry in cfg.get("whitelist", []):
+                token = entry.get("ip", "")
+                if token and token in candidate_line:
+                    candidate_line = ""
+                    break
+            address_tokens = re.findall(r"(?:\d{1,3}\.){3}\d{1,3}", candidate_line)
+            address_tokens.extend(re.findall(
+                r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:])",
+                candidate_line,
+            ))
+            if any(_is_global_address_token(token) for token in address_tokens):
+                candidate_line = ""
+            if not candidate_line:
+                continue
+        filtered_lines.append(line)
+    redacted = "".join(filtered_lines)
+
+    for entry in cfg.get("public_key_whitelist", []):
+        for key in ("public_key", "fingerprint", "id"):
+            token = entry.get(key, "")
+            if token:
+                redacted = redacted.replace(token, "[全局公钥已隐藏]")
+
+    def _redact_ip(match):
+        token = match.group(0)
+        return "[全局 IP 已隐藏]" if _is_global_address_token(token) else token
+
+    redacted = re.sub(r"(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])", _redact_ip, redacted)
+    redacted = re.sub(
+        r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:])",
+        _redact_ip,
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?<![\w:])::ffff:(?:\d{1,3}\.){3}\d{1,3}(?![\w.])",
+        _redact_ip,
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    return redacted
+
+
+def _sanitize_run_results(results: list[dict], cfg: dict) -> list[dict]:
+    if _is_superadmin():
+        return results
+    safe = []
+    for result in results:
+        item = dict(result)
+        item["output"] = _redact_sensitive_output(item.get("output", ""), cfg)
+        safe.append(item)
+    return safe
+
+
+def _generate_scoped_status_script(ssh_port: int) -> str:
+    """受限管理员状态摘要：不输出规则地址、全局公钥存在性或数量。"""
+    return f"""#!/bin/bash
+echo "=== SSH 白名单状态摘要 ==="
+echo "服务器: $(hostname)"
+echo "时间: $(date)"
+if systemctl is-active --quiet firewalld 2>/dev/null; then
+    echo "[防火墙] firewalld 运行中"
+    firewall-cmd --list-rich-rules 2>/dev/null | grep -q "{ssh_port}" && echo "[策略] 已部署" || echo "[策略] 未检测到"
+elif command -v iptables &>/dev/null; then
+    echo "[防火墙] iptables 可用"
+    iptables -L SSH_WHITELIST -n >/dev/null 2>&1 && echo "[策略] 已部署" || echo "[策略] 未检测到"
+else
+    echo "[防火墙] 未检测到受支持的后端"
+fi
+"""
+
+
 # ─── 页面 ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -1092,19 +1504,61 @@ def index():
 @app.route("/api/config")
 def api_config():
     cfg = load_config(purge=False)
-    # 不暴露明文密码到前端
-    servers_safe = []
-    for s in cfg.get("servers", []):
-        s2 = dict(s)
-        s2["has_password"] = bool(s2.pop("password", ""))
-        servers_safe.append(s2)
-    cfg["servers"] = servers_safe
-    return jsonify(cfg)
+    account = g.current_account
+    capabilities = {
+        "is_superadmin": _is_superadmin(account),
+        "manage_global": _is_superadmin(account),
+        "manage_servers": _is_superadmin(account),
+        "manage_accounts": _is_superadmin(account),
+        "manage_locked": _is_superadmin(account),
+        "audit_deploy": _is_superadmin(account),
+        "remove_remote": _is_superadmin(account),
+    }
+    response = {
+        "current_user": {
+            "username": account["username"],
+            "role": account.get("role", "scoped_admin"),
+            "server_hosts": sorted(_allowed_server_hosts(cfg, account)),
+            "must_change_password": not account.get("password_changed", False),
+        },
+        "capabilities": capabilities,
+        "servers": [],
+    }
+
+    if _is_superadmin(account):
+        response["whitelist"] = cfg.get("whitelist", [])
+        response["public_key_whitelist"] = cfg.get("public_key_whitelist", [])
+        settings = cfg.get("settings", {})
+        response["settings"] = {
+            "ssh_port": settings.get("ssh_port", 22),
+            "persist_rules": settings.get("persist_rules", True),
+            "proxy": settings.get("proxy", ""),
+            "auto_deploy": settings.get("auto_deploy", {}),
+        }
+        for server in cfg.get("servers", []):
+            safe = dict(server)
+            safe["has_password"] = bool(safe.pop("password", ""))
+            response["servers"].append(safe)
+    else:
+        allowed = _allowed_server_hosts(cfg, account)
+        for server in cfg.get("servers", []):
+            if server["host"] not in allowed:
+                continue
+            response["servers"].append({
+                "host": server["host"],
+                "name": server.get("name", server["host"]),
+                "enabled": server.get("enabled", True),
+                "whitelist": server.get("whitelist", []),
+                "public_key_whitelist": server.get("public_key_whitelist", []),
+            })
+    return jsonify(response)
 
 
 # ─── API：白名单管理 ───────────────────────────────────────────────────────────
 
 @app.route("/api/whitelist", methods=["POST"])
+@superadmin_required
+@config_update_locked
 def api_whitelist_add():
     data = request.json or {}
     ip = data.get("ip", "").strip()
@@ -1159,6 +1613,8 @@ def api_whitelist_add():
 
 
 @app.route("/api/whitelist/<path:ip>", methods=["DELETE"])
+@superadmin_required
+@config_update_locked
 def api_whitelist_remove(ip):
     cfg = load_config()
     entry = next((e for e in cfg["whitelist"] if e["ip"] == ip), None)
@@ -1173,6 +1629,8 @@ def api_whitelist_remove(ip):
 
 
 @app.route("/api/whitelist/<path:ip>", methods=["PATCH"])
+@superadmin_required
+@config_update_locked
 def api_whitelist_update(ip):
     """更新全局白名单条目（IP、备注、有效期）。"""
     data = request.json or {}
@@ -1219,6 +1677,8 @@ def api_whitelist_update(ip):
 
 
 @app.route("/api/whitelist/<path:ip>/lock", methods=["PATCH"])
+@superadmin_required
+@config_update_locked
 def api_whitelist_lock(ip):
     """锁定/解锁全局白名单条目。锁定后该条目无法被删除、编辑或被 Guest 自助换 IP。"""
     data = request.json or {}
@@ -1266,6 +1726,10 @@ def _parse_public_key_request(data: dict, existing: dict = None) -> dict:
 def _api_public_key_add(host: str | None = None):
     data = request.json or {}
     cfg = load_config()
+    if host:
+        _, error = _server_for_account(cfg, host)
+        if error:
+            return error
     owner, wl = _public_key_scope(cfg, host)
     if owner is None:
         return jsonify({"success": False, "message": f"未找到服务器: {host}"}), 404
@@ -1296,17 +1760,24 @@ def _api_public_key_add(host: str | None = None):
 
 
 @app.route("/api/public-keys", methods=["POST"])
+@superadmin_required
+@config_update_locked
 def api_public_key_add():
     return _api_public_key_add()
 
 
 @app.route("/api/servers/<path:host>/public-keys", methods=["POST"])
+@config_update_locked
 def api_server_public_key_add(host):
     return _api_public_key_add(host)
 
 
 def _api_public_key_item(key_id: str, host: str | None = None):
     cfg = load_config()
+    if host:
+        _, error = _server_for_account(cfg, host)
+        if error:
+            return error
     owner, wl = _public_key_scope(cfg, host)
     if owner is None:
         return jsonify({"success": False, "message": f"未找到服务器: {host}"}), 404
@@ -1341,11 +1812,14 @@ def _api_public_key_item(key_id: str, host: str | None = None):
 
 
 @app.route("/api/public-keys/<key_id>", methods=["PATCH", "DELETE"])
+@superadmin_required
+@config_update_locked
 def api_public_key_item(key_id):
     return _api_public_key_item(key_id)
 
 
 @app.route("/api/servers/<path:host>/public-keys/<key_id>", methods=["PATCH", "DELETE"])
+@config_update_locked
 def api_server_public_key_item(host, key_id):
     return _api_public_key_item(key_id, host)
 
@@ -1355,6 +1829,10 @@ def _api_public_key_lock(key_id: str, host: str | None = None):
     if "locked" not in data:
         return jsonify({"success": False, "message": "缺少 locked 字段"}), 400
     cfg = load_config()
+    if host:
+        _, error = _server_for_account(cfg, host)
+        if error:
+            return error
     owner, wl = _public_key_scope(cfg, host)
     if owner is None:
         return jsonify({"success": False, "message": f"未找到服务器: {host}"}), 404
@@ -1370,11 +1848,15 @@ def _api_public_key_lock(key_id: str, host: str | None = None):
 
 
 @app.route("/api/public-keys/<key_id>/lock", methods=["PATCH"])
+@superadmin_required
+@config_update_locked
 def api_public_key_lock(key_id):
     return _api_public_key_lock(key_id)
 
 
 @app.route("/api/servers/<path:host>/public-keys/<key_id>/lock", methods=["PATCH"])
+@superadmin_required
+@config_update_locked
 def api_server_public_key_lock(host, key_id):
     return _api_public_key_lock(key_id, host)
 
@@ -1382,6 +1864,8 @@ def api_server_public_key_lock(host, key_id):
 # ─── API：服务器管理 ──────────────────────────────────────────────────────────
 
 @app.route("/api/servers", methods=["POST"])
+@superadmin_required
+@config_update_locked
 def api_server_add():
     data = request.json or {}
     host = data.get("host", "").strip()
@@ -1412,6 +1896,8 @@ def api_server_add():
 
 
 @app.route("/api/servers/<path:host>", methods=["DELETE"])
+@superadmin_required
+@config_update_locked
 def api_server_remove(host):
     cfg = load_config()
     srv = _find_server(cfg, host)
@@ -1439,6 +1925,9 @@ def api_server_remove(host):
             }), 502
 
     cfg["servers"] = [s for s in cfg["servers"] if s["host"] != srv["host"]]
+    accounts, _ = _normalize_auth_accounts(cfg)
+    for account in accounts:
+        account["server_hosts"] = [h for h in account.get("server_hosts", []) if h != srv["host"]]
     save_config(cfg)
     message = (f"已强制移除服务器 {name}（未取消远端白名单，远端可能残留规则）"
                if force else f"已取消白名单并移除服务器 {name}")
@@ -1446,6 +1935,8 @@ def api_server_remove(host):
 
 
 @app.route("/api/servers/<path:host>", methods=["PATCH"])
+@superadmin_required
+@config_update_locked
 def api_server_update(host):
     """更新服务器密码或代理设置。"""
     data = request.json or {}
@@ -1466,6 +1957,8 @@ def api_server_update(host):
 
 
 @app.route("/api/servers/<path:host>/toggle", methods=["POST"])
+@superadmin_required
+@config_update_locked
 def api_server_toggle(host):
     """启用/禁用服务器。
 
@@ -1519,6 +2012,7 @@ def api_server_toggle(host):
 # ─── API：服务器专属白名单 ─────────────────────────────────────────────────────
 
 @app.route("/api/servers/<path:host>/whitelist", methods=["POST"])
+@config_update_locked
 def api_server_whitelist_add(host):
     data = request.json or {}
     ip = data.get("ip", "").strip()
@@ -1538,9 +2032,9 @@ def api_server_whitelist_add(host):
             return jsonify({"success": False, "message": str(e)}), 400
 
     cfg = load_config()
-    srv = _find_server(cfg, host)
-    if not srv:
-        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+    srv, error = _server_for_account(cfg, host)
+    if error:
+        return error
 
     wl = srv.setdefault("whitelist", [])
     if any(e["ip"] == ip for e in wl):
@@ -1554,11 +2048,12 @@ def api_server_whitelist_add(host):
 
 
 @app.route("/api/servers/<path:host>/whitelist/<path:ip>", methods=["DELETE"])
+@config_update_locked
 def api_server_whitelist_remove(host, ip):
     cfg = load_config()
-    srv = _find_server(cfg, host)
-    if not srv:
-        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+    srv, error = _server_for_account(cfg, host)
+    if error:
+        return error
 
     wl = srv.get("whitelist", [])
     entry = next((e for e in wl if e["ip"] == ip), None)
@@ -1573,14 +2068,15 @@ def api_server_whitelist_remove(host, ip):
 
 
 @app.route("/api/servers/<path:host>/whitelist/<path:ip>", methods=["PATCH"])
+@config_update_locked
 def api_server_whitelist_update(host, ip):
     """更新服务器专属白名单条目（IP、备注、有效期）。"""
     data = request.json or {}
     cfg = load_config()
 
-    srv = _find_server(cfg, host)
-    if not srv:
-        return jsonify({"success": False, "message": f"服务器 {host} 不存在"}), 404
+    srv, error = _server_for_account(cfg, host)
+    if error:
+        return error
 
     wl = srv.get("whitelist", [])
     entry = next((e for e in wl if e["ip"] == ip), None)
@@ -1616,6 +2112,8 @@ def api_server_whitelist_update(host, ip):
 
 
 @app.route("/api/servers/<path:host>/whitelist/<path:ip>/lock", methods=["PATCH"])
+@superadmin_required
+@config_update_locked
 def api_server_whitelist_lock(host, ip):
     """锁定/解锁服务器专属白名单条目。"""
     data = request.json or {}
@@ -1643,6 +2141,8 @@ def api_server_whitelist_lock(host, ip):
 # ─── API：设置 ────────────────────────────────────────────────────────────────
 
 @app.route("/api/settings", methods=["PATCH"])
+@superadmin_required
+@config_update_locked
 def api_settings():
     data = request.json or {}
     cfg = load_config()
@@ -1735,12 +2235,12 @@ def api_deploy():
     server_filter = data.get("server") or None
     audit = bool(data.get("audit", False))
     dry_run = bool(data.get("dry_run", False))
+    if audit and not _is_superadmin():
+        return jsonify({"success": False, "message": "仅超级管理员可使用审计模式下发"}), 403
 
-    servers = cfg["servers"]
-    if server_filter:
-        servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
-        if not servers:
-            return jsonify({"success": False, "message": f"未找到服务器: {server_filter}"}), 404
+    servers, error = _servers_for_account(cfg, server_filter)
+    if error:
+        return error
 
     # 跳过已禁用的服务器（禁用 = 已取消白名单并排除下发）
     servers = [s for s in servers if s.get("enabled", True)]
@@ -1754,7 +2254,9 @@ def api_deploy():
     server_key_map = {s["host"]: get_merged_public_keys(s, global_public_keys) for s in servers}
 
     if all(not server_merged_map[s["host"]] and not server_key_map[s["host"]] for s in servers):
-        return jsonify({"success": False, "message": "IP 与公钥白名单均为空，请通过过期调度严格撤权或先配置恢复通道"}), 400
+        message = ("IP 与公钥白名单均为空，请通过过期调度严格撤权或先配置恢复通道"
+                   if _is_superadmin() else "当前配置无法安全下发，请联系超级管理员")
+        return jsonify({"success": False, "message": message}), 400
 
     # 硬拦截：管理服务器（运行本 Web 应用的主机）的本地出口 IP 必须在全局白名单中。
     # 防止误删/误改导致管理机失去对目标服务器的 SSH 访问能力——此处只接受全局白名单，
@@ -1770,6 +2272,12 @@ def api_deploy():
             and not has_locked_recovery_path(s, local_ip, global_whitelist, server_key_map[s["host"]])
         ]
         if unsafe_hybrid:
+            if not _is_superadmin():
+                return jsonify({
+                    "success": False,
+                    "message": "安全检查未通过，请联系超级管理员检查永久恢复通道",
+                    "servers": [s["host"] for s in unsafe_hybrid],
+                }), 403
             return jsonify({
                 "success": False,
                 "message": (
@@ -1782,6 +2290,9 @@ def api_deploy():
         ip_only_servers = [s for s in servers if not server_key_map[s["host"]]]
         if (local_ip not in loopback_or_unknown and ip_only_servers
                 and not ip_covered_by_whitelist(local_ip, global_whitelist)):
+            if not _is_superadmin():
+                return jsonify({"success": False,
+                                "message": "安全检查未通过，请联系超级管理员检查管理机恢复通道"}), 403
             return jsonify({"success": False,
                             "message": f"拦截：管理服务器本地 IP {local_ip} 不在全局白名单中。",
                             "local_ip": local_ip}), 403
@@ -1791,6 +2302,13 @@ def api_deploy():
 
     def _deploy_one(server):
         merged = server_merged_map[server["host"]]
+        if dry_run and not _is_superadmin():
+            return {
+                "server": server.get("name", server["host"]),
+                "host": server["host"],
+                "success": True,
+                "output": "[DRY-RUN] 配置校验通过；全局规则和生成脚本已隐藏。",
+            }
         script = generate_apply_script(
             merged, ssh_port, persist, audit=audit,
             public_keys=server_key_map[server["host"]],
@@ -1803,7 +2321,7 @@ def api_deploy():
             "output": output,
         }
 
-    results = _parallel_run(servers, _deploy_one)
+    results = _sanitize_run_results(_parallel_run(servers, _deploy_one), cfg)
     success_count = sum(1 for r in results if r["success"])
 
     return jsonify({
@@ -1817,6 +2335,7 @@ def api_deploy():
 # ─── API：取消白名单 ──────────────────────────────────────────────────────────
 
 @app.route("/api/remove", methods=["POST"])
+@superadmin_required
 def api_remove():
     data = request.json or {}
     cfg = load_config()
@@ -1865,12 +2384,14 @@ def api_status():
         return jsonify({"success": False, "message": "服务器列表为空"}), 400
 
     server_filter = request.args.get("server")
-    servers = cfg["servers"]
-    if server_filter:
-        servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
+    servers, error = _servers_for_account(cfg, server_filter)
+    if error:
+        return error
+    if not servers:
+        return jsonify({"success": False, "message": "没有可管理的服务器"}), 400
 
     ssh_port = cfg["settings"].get("ssh_port", 22)
-    script = generate_status_script(ssh_port)
+    script = generate_status_script(ssh_port) if _is_superadmin() else _generate_scoped_status_script(ssh_port)
 
     def _status_one(server):
         ok, output = capture_run(server, script, config=cfg)
@@ -1881,7 +2402,7 @@ def api_status():
             "output": output,
         }
 
-    results = _parallel_run(servers, _status_one)
+    results = _sanitize_run_results(_parallel_run(servers, _status_one), cfg)
 
     return jsonify({"success": True, "results": results})
 
@@ -1895,10 +2416,15 @@ def api_audit_log():
         return jsonify({"success": False, "message": "服务器列表为空"}), 400
 
     server_filter = request.args.get("server")
-    lines = int(request.args.get("lines", 50))
-    servers = cfg["servers"]
-    if server_filter:
-        servers = [s for s in servers if s["host"] == server_filter or s.get("name") == server_filter]
+    try:
+        lines = max(1, min(int(request.args.get("lines", 50)), 500))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "lines 必须为整数"}), 400
+    servers, error = _servers_for_account(cfg, server_filter)
+    if error:
+        return error
+    if not servers:
+        return jsonify({"success": False, "message": "没有可管理的服务器"}), 400
 
     ssh_port = cfg["settings"].get("ssh_port", 22)
     script = generate_audit_log_script(ssh_port, lines)
@@ -1912,7 +2438,7 @@ def api_audit_log():
             "output": output,
         }
 
-    results = _parallel_run(servers, _audit_one)
+    results = _sanitize_run_results(_parallel_run(servers, _audit_one), cfg)
 
     return jsonify({"success": True, "results": results})
 
